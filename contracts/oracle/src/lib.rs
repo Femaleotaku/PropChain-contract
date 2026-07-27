@@ -3482,4 +3482,3 @@ mod propchain_oracle {
 pub use propchain_traits::OracleError;
 
 pub mod reputation_slashing;
-
