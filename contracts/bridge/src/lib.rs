@@ -3591,8 +3591,9 @@ mod bridge {
     include!("tests.rs");
 }
 
+pub mod audit_log_bounded;
 pub mod bridge_history_pagination;
 pub mod submodules;
 pub mod token_freeze;
-pub mod audit_log_bounded;
 pub mod validator_bitmap_fix;
+
