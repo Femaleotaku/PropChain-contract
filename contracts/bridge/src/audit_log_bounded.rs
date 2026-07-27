@@ -2,6 +2,12 @@ pub struct BoundedAuditLog {
     pub max_records: usize,
 }
 
+impl Default for BoundedAuditLog {
+    fn default() -> Self {
+        Self::new(1000)
+    }
+}
+
 impl BoundedAuditLog {
     pub fn new(max_records: usize) -> Self {
         Self { max_records }

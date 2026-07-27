@@ -2,6 +2,12 @@ pub struct ValidatorBitmapSigner {
     pub max_validators: u32,
 }
 
+impl Default for ValidatorBitmapSigner {
+    fn default() -> Self {
+        Self::new(100)
+    }
+}
+
 impl ValidatorBitmapSigner {
     pub fn new(max_validators: u32) -> Self {
         Self { max_validators }

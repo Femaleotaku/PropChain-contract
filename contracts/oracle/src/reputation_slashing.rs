@@ -4,6 +4,12 @@ pub struct OracleSlashingManager {
     pub min_reputation_score: u32,
 }
 
+impl Default for OracleSlashingManager {
+    fn default() -> Self {
+        Self::new(50)
+    }
+}
+
 impl OracleSlashingManager {
     pub fn new(min_reputation_score: u32) -> Self {
         Self {
