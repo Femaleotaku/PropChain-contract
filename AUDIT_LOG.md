@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Fri Jul 31 05:39:55 UTC 2026
+Generated on: Sat Aug  1 05:31:44 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -135,6 +135,14 @@ cargo-deny failed or flagged warnings
 [0m[0m[1m[33mDate:     [0m 2026-07-05
 [0m[0m[1m[33mID:       [0m RUSTSEC-2026-0202
 [0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0202
+
+[0m[0m[1m[33mCrate:    [0m event-listener
+[0m[0m[1m[33mVersion:  [0m 5.4.1
+[0m[0m[1m[33mWarning:  [0m unsound
+[0m[0m[1m[33mTitle:    [0m `event-listener` allows `!Send` tags to cross thread boundaries via `StackSlot`
+[0m[0m[1m[33mDate:     [0m 2026-07-13
+[0m[0m[1m[33mID:       [0m RUSTSEC-2026-0221
+[0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0221
 
 [0m[0m[1m[33mCrate:    [0m lru
 [0m[0m[1m[33mVersion:  [0m 0.12.5
