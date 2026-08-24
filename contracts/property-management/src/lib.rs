@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 
@@ -6,7 +7,7 @@ use ink::storage::Mapping;
 use propchain_traits::{non_reentrant, ComplianceChecker, ReentrancyError, ReentrancyGuard};
 
 #[ink::contract]
-mod property_management {
+pub mod property_management {
     use super::*;
 
     pub type TokenId = u64;
@@ -460,6 +461,7 @@ mod property_management {
 
     impl PropertyManagement {
         #[ink(constructor)]
+        #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             let caller = Self::env().caller();
             Self {
