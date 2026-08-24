@@ -291,6 +291,50 @@ mod propchain_analytics {
             trends
         }
 
+        /// Derive human-readable insights from the report's own data instead
+        /// of shipping a hardcoded sentence.
+        ///
+        /// The text reflects the latest trend direction (price / volume) and
+        /// the aggregated crowd sentiment, so materially different market
+        /// states produce different insights.
+        fn derive_insights(&self, trend: &MarketTrend) -> String {
+            let mut parts: Vec<String> = Vec::new();
+
+            if trend.price_change_percentage > 0 {
+                parts.push(String::from("prices are trending upward"));
+            } else if trend.price_change_percentage < 0 {
+                parts.push(String::from("prices are trending downward"));
+            } else {
+                parts.push(String::from("prices are stable"));
+            }
+
+            if trend.volume_change_percentage > 0 {
+                parts.push(String::from("trading volume is increasing"));
+            } else if trend.volume_change_percentage < 0 {
+                parts.push(String::from("trading volume is decreasing"));
+            } else {
+                parts.push(String::from("trading volume is flat"));
+            }
+
+            let total_volume = self
+                .overall_sentiment
+                .bull_volume
+                .saturating_add(self.overall_sentiment.bear_volume);
+            if total_volume == 0 {
+                parts.push(String::from("no crowd sentiment data available yet"));
+            } else if self.overall_sentiment.bull_volume > self.overall_sentiment.bear_volume {
+                parts.push(String::from("crowd sentiment leans bullish"));
+            } else if self.overall_sentiment.bear_volume > self.overall_sentiment.bull_volume {
+                parts.push(String::from("crowd sentiment leans bearish"));
+            } else {
+                parts.push(String::from("crowd sentiment is evenly split"));
+            }
+
+            let mut text = parts.join(", ");
+            text.push('.');
+            text
+        }
+
         /// Create automated market reports generation
         #[ink(message)]
         pub fn generate_market_report(&self) -> MarketReport {
@@ -312,14 +356,13 @@ mod propchain_analytics {
                 }
             };
 
+            let insights = self.derive_insights(&latest_trend);
             MarketReport {
                 generated_at: self.env().block_timestamp(),
                 metrics: self.current_metrics.clone(),
                 trend: latest_trend,
                 sentiment: self.overall_sentiment.clone(),
-                insights: String::from(
-                    "Market is relatively stable. Gas optimization is recommended.",
-                ),
+                insights,
             }
         }
 
@@ -667,6 +710,54 @@ mod propchain_analytics {
         #[ink(message)]
         pub fn get_pending_admin_rotation(&self) -> Option<propchain_traits::KeyRotationRequest> {
             self.pending_admin_rotation.clone()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn trend(price: i32, volume: i32) -> MarketTrend {
+            MarketTrend {
+                period_start: 0,
+                period_end: 100,
+                price_change_percentage: price,
+                volume_change_percentage: volume,
+            }
+        }
+
+        /// Insights must be derived from report data, not hardcoded:
+        /// materially different market states produce different text.
+        #[ink::test]
+        fn insights_differ_between_market_states() {
+            // Bullish market: rising prices, rising volume, bull-heavy sentiment.
+            let mut bullish = AnalyticsDashboard::new();
+            bullish.add_market_trend(trend(5, 10));
+            bullish.update_market_sentiment(1, 800, 200);
+            let bull_report = bullish.generate_market_report();
+            assert!(bull_report.insights.contains("upward"), "{}", bull_report.insights);
+            assert!(bull_report.insights.contains("increasing"));
+            assert!(bull_report.insights.contains("bullish"));
+
+            // Bearish market: falling prices, falling volume, bear-heavy sentiment.
+            let mut bearish = AnalyticsDashboard::new();
+            bearish.add_market_trend(trend(-7, -3));
+            bearish.update_market_sentiment(1, 150, 850);
+            let bear_report = bearish.generate_market_report();
+            assert!(bear_report.insights.contains("downward"));
+            assert!(bear_report.insights.contains("decreasing"));
+            assert!(bear_report.insights.contains("bearish"));
+
+            assert_ne!(bull_report.insights, bear_report.insights);
+        }
+
+        /// A contract with no data yet reports a stable/no-data insights text.
+        #[ink::test]
+        fn insights_without_data_mention_stability_and_missing_sentiment() {
+            let contract = AnalyticsDashboard::new();
+            let report = contract.generate_market_report();
+            assert!(report.insights.contains("stable"));
+            assert!(report.insights.contains("no crowd sentiment data"));
         }
     }
 }

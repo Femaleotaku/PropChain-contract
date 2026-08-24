@@ -325,6 +325,7 @@ mod propchain_fees {
                 min_bid,
                 current_bid: 0,
                 current_bidder: None,
+                escrowed_value: 0,
                 end_time: now.saturating_add(duration_seconds),
                 settled: false,
                 fee_paid: fee,
@@ -341,11 +342,18 @@ mod propchain_fees {
             Ok(auction_id)
         }
 
-        /// Place or increase bid (bid must be > current_bid and >= min_bid)
-        #[ink(message)]
+        /// Place or increase a bid on an active premium listing auction.
+        ///
+        /// The bid is **payable**: the caller must attach the full bid amount
+        /// as transferred value so the contract can hold it in custody until
+        /// settlement. Any overpayment above the bid amount is immediately
+        /// refunded, and the previous highest bidder is fully refunded their
+        /// escrowed amount before the new bid is recorded.
+        #[ink(message, payable)]
         pub fn place_bid(&mut self, auction_id: u64, amount: u128) -> Result<(), FeeError> {
             let caller = self.env().caller();
             let now = self.env().block_timestamp();
+            let attached = self.env().transferred_value();
             let mut auction = self
                 .auctions
                 .get(auction_id)
@@ -362,9 +370,37 @@ mod propchain_fees {
             if amount <= auction.current_bid {
                 return Err(FeeError::BidTooLow);
             }
+            // The attached value must cover the whole bid — it is held in
+            // custody by the contract until settlement.
+            if attached < amount {
+                return Err(FeeError::InsufficientValue);
+            }
+
+            // Refund the previous highest bidder before recording the new bid
+            // (checks-effects-interactions: state is updated below only after
+            // every fallible operation has succeeded).
+            let previous_escrow = auction.escrowed_value;
+            if let Some(previous_bidder) = auction.current_bidder {
+                if previous_escrow > 0
+                    && self
+                        .env()
+                        .transfer(previous_bidder, previous_escrow)
+                        .is_err()
+                {
+                    return Err(FeeError::TransferFailed);
+                }
+            }
+
+            // Refund any overpayment so exactly `amount` stays in custody.
+            let excess = attached - amount;
+            if excess > 0 && self.env().transfer(caller, excess).is_err() {
+                return Err(FeeError::TransferFailed);
+            }
+
             let outbid = auction.current_bid;
             auction.current_bid = amount;
             auction.current_bidder = Some(caller);
+            auction.escrowed_value = amount;
             self.auctions.insert(auction_id, &auction);
             self.auction_bids.insert(
                 (auction_id, caller),
@@ -383,7 +419,9 @@ mod propchain_fees {
             Ok(())
         }
 
-        /// Settle auction after end_time; winner is current_bidder
+        /// Settle auction after end_time; winner is current_bidder.
+        ///
+        /// The winning bid amount held in custody is paid out to the seller.
         #[ink(message)]
         pub fn settle_auction(&mut self, auction_id: u64) -> Result<(), FeeError> {
             let now = self.env().block_timestamp();
@@ -399,8 +437,15 @@ mod propchain_fees {
             }
             let winner = auction.current_bidder.ok_or(FeeError::AuctionNotFound)?;
             let amount = auction.current_bid;
+            // Take the escrowed bid out of custody before persisting so a
+            // re-entering caller can never observe (and double-claim) it.
+            let escrowed = auction.escrowed_value;
             auction.settled = true;
+            auction.escrowed_value = 0;
             self.auctions.insert(auction_id, &auction);
+            if escrowed > 0 && self.env().transfer(auction.seller, escrowed).is_err() {
+                return Err(FeeError::TransferFailed);
+            }
             // fee_paid was already added to fee_treasury at auction creation
             self.env().emit_event(PremiumAuctionSettled {
                 auction_id,
@@ -700,4 +745,6 @@ mod propchain_fees {
             self.calculate_fee(operation)
         }
     }
+
+    include!("tests.rs");
 }
