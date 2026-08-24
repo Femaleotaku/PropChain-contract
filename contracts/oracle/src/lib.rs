@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::arithmetic_side_effects,
@@ -3474,6 +3475,10 @@ mod propchain_oracle {
             Self::new(AccountId::from([0x0u8; 32]))
         }
     }
+
+    // Include unit tests (extracted to tests.rs per Issue #101)
+    #[cfg(test)]
+    include!("tests.rs");
 }
 
 // Re-export the contract and error type
