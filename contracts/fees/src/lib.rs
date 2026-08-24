@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 
@@ -16,7 +17,7 @@ use propchain_traits::{DynamicFeeProvider, FeeOperation};
 // every test after every include isn't worth the structural churn, so
 // suppress the lint here.
 #[allow(clippy::items_after_test_module)]
-mod propchain_fees {
+pub mod propchain_fees {
     use super::*;
 
     /// Basis points denominator (10000 = 100%)

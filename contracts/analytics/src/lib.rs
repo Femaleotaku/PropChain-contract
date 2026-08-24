@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 #![allow(clippy::new_without_default)]
@@ -6,7 +7,7 @@ use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
 
 #[ink::contract]
-mod propchain_analytics {
+pub mod propchain_analytics {
     use super::*;
 
     /// Market metrics representing aggregated property data.
