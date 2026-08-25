@@ -2610,25 +2610,58 @@ mod propchain_oracle {
         }
 
         /// Fetch price from an external endpoint (Chainlink, Pyth, Substrate, Custom).
-        /// In production, this makes a cross-contract call to the oracle adapter
-        /// contract identified by `source_id`. Returns PriceFeedError if the
-        /// external service is unreachable or returns invalid data.
+        ///
+        /// Makes a cross-contract call to the oracle adapter contract identified
+        /// by `source_id`. The adapter must expose a `get_price(property_id) -> u128`
+        /// message. Returns `PriceFeedError` if the external service is unreachable,
+        /// reverts, or returns invalid data.
         fn fetch_from_external_endpoint(
             &self,
             source_id: &ink::prelude::string::String,
-            _property_id: u64,
+            property_id: u64,
         ) -> Result<PriceData, OracleError> {
-            // External oracle adapters are deployed as separate contracts.
-            // Each source_id maps to a contract address that implements
-            // the OracleFeed trait: fn get_price(property_id: u64) -> u128
-            //
-            // TODO: Replace with actual cross-contract call:
-            //   let adapter = OracleFeedRef::from(source_contract_addr);
-            //   let price = adapter.get_price(property_id)?;
-            //
-            // For now, return PriceFeedError to trigger the fallback path.
-            let _ = source_id;
-            Err(OracleError::PriceFeedError)
+            let source = self
+                .oracle_sources
+                .get(source_id)
+                .ok_or(OracleError::OracleSourceNotFound)?;
+            let adapter_addr = source.address;
+
+            // Selector for `get_price(u64) -> u128`.
+            // Computed as the first 4 bytes of the BLAKE2-256 hash of the
+            // message signature "OracleFeed.get_price".
+            let selector: [u8; 4] = {
+                let mut output = <ink::env::hash::Blake2x256 as ink::env::hash::HashOutput>::Type::default();
+                ink::env::hash_bytes::<ink::env::hash::Blake2x256>(
+                    b"OracleFeed.get_price",
+                    &mut output,
+                );
+                [output[0], output[1], output[2], output[3]]
+            };
+
+            let call_result = ink::env::call::build_call::<ink::env::DefaultEnvironment>()
+                .call_v1(adapter_addr)
+                .exec_input(
+                    ink::env::call::ExecutionInput::new(ink::env::call::Selector::new(selector))
+                        .push_arg(&property_id),
+                )
+                .returns::<u128>()
+                .try_invoke();
+
+            match call_result {
+                Ok(Ok(price)) => {
+                    if price == 0 {
+                        return Err(OracleError::PriceFeedError);
+                    }
+                    let now = self.env().block_timestamp();
+                    Ok(PriceData {
+                        price,
+                        timestamp: now,
+                        source: source_id.clone(),
+                    })
+                }
+                Ok(Err(_lang_err)) => Err(OracleError::PriceFeedError),
+                Err(_env_err) => Err(OracleError::PriceFeedError),
+            }
         }
 
         /// Retrieve the most recent manually-submitted price for a property.

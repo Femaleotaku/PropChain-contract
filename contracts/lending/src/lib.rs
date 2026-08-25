@@ -1456,9 +1456,16 @@ mod propchain_lending {
             let approved = restructuring.borrower_approved && restructuring.lender_approved;
             if approved {
                 self.update_interest_snapshot(loan_id)?;
-                // TODO(#lending-jit-stale-write): reload `app` from storage
-                // after update_interest_snapshot so we don't overwrite the
-                // freshly-accrued interest with the stale in-memory copy.
+
+                // Reload the loan application from storage after the interest
+                // snapshot has been computed and persisted. The in-memory `app`
+                // still holds the pre-snapshot accrued_interest; writing it back
+                // would clobber the freshly-computed value.
+                let mut app = self
+                    .loan_applications
+                    .get(loan_id)
+                    .ok_or(LendingError::LoanNotFound)?;
+
                 app.term_months = restructuring.proposed_term_months;
                 app.interest_rate_bps = restructuring.proposed_interest_rate_bps;
                 app.status = LoanStatus::Restructured;
