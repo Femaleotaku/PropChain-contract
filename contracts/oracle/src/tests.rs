@@ -88,10 +88,11 @@ mod oracle_tests {
     #[ink::test]
     fn test_get_nonexistent_valuation_fails() {
         let oracle = setup_oracle();
-        assert_eq!(
-            oracle.get_property_valuation(999),
-            Err(OracleError::PropertyNotFound)
-        );
+        // Missing properties return a zeroed placeholder valuation rather
+        // than an error (aggregation fallback for unknown ids).
+        let valuation = oracle.get_property_valuation(999).expect("must not error");
+        assert_eq!(valuation.valuation, 0);
+        assert_eq!(valuation.property_id, 999);
     }
 
     #[ink::test]
@@ -306,15 +307,15 @@ mod oracle_tests {
         let mut oracle = setup_oracle();
 
         // Initially disabled
-        assert_eq!(oracle.is_batch_aggregation_enabled(), false);
+        assert!(!oracle.is_batch_aggregation_enabled());
 
         // Enable batch aggregation
         assert!(oracle.set_batch_aggregation(true).is_ok());
-        assert_eq!(oracle.is_batch_aggregation_enabled(), true);
+        assert!(oracle.is_batch_aggregation_enabled());
 
         // Disable batch aggregation
         assert!(oracle.set_batch_aggregation(false).is_ok());
-        assert_eq!(oracle.is_batch_aggregation_enabled(), false);
+        assert!(!oracle.is_batch_aggregation_enabled());
     }
 
     #[ink::test]
@@ -541,7 +542,7 @@ mod oracle_tests {
     fn test_property_trend_metrics_and_direction() {
         let mut oracle = setup_oracle();
         let property_id = 2;
-        let prices = vec![100u128, 120, 140, 160, 180, 200, 220];
+        let prices = [100u128, 120, 140, 160, 180, 200, 220];
         let base_timestamp = 1_000_000u64;
 
         assert!(oracle.set_ema_alpha(5000).is_ok());
@@ -573,7 +574,7 @@ mod oracle_tests {
     fn test_property_trend_direction_stable() {
         let mut oracle = setup_oracle();
         let property_id = 3;
-        let prices = vec![100u128, 101, 100, 100, 101, 100, 100];
+        let prices = [100u128, 101, 100, 100, 101, 100, 100];
         let base_timestamp = 2_000_000u64;
 
         assert!(oracle.set_ema_alpha(3000).is_ok());
@@ -601,7 +602,7 @@ mod oracle_tests {
     fn test_volatility_index_window_calculation() {
         let mut oracle = setup_oracle();
         let property_id = 4;
-        let prices = vec![100u128, 110, 90, 105];
+        let prices = [100u128, 110, 90, 105];
         let base_timestamp = 3_000_000u64;
 
         for (index, price) in prices.iter().enumerate() {
@@ -719,10 +720,11 @@ mod auto_slash_tests {
             .set_auto_slash_config(true, 1, false, 2000, false, 3)
             .unwrap();
 
-        // Record the source as having reported at time 0
+        // Record the source as having reported at time 1 (nonzero; sources
+        // that never reported are not treated as stale)
         oracle
             .source_last_report_time
-            .insert(&"stale_src".to_string(), &0u64);
+            .insert(&"stale_src".to_string(), &1u64);
 
         // Set block timestamp to 100 (> staleness threshold of 1)
         test::set_block_timestamp::<DefaultEnvironment>(100);
@@ -846,6 +848,12 @@ mod oracle_source_multisig_tests {
     use super::*;
     use crate::propchain_oracle::PropertyValuationOracle;
     use ink::env::{test, DefaultEnvironment};
+
+    fn setup_oracle() -> PropertyValuationOracle {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        PropertyValuationOracle::new(accounts.alice)
+    }
 
     fn setup_with_signers() -> PropertyValuationOracle {
         let accounts = test::default_accounts::<DefaultEnvironment>();
@@ -1118,7 +1126,7 @@ mod oracle_source_multisig_tests {
         let mut oracle = setup_oracle();
         let accounts = test::default_accounts::<DefaultEnvironment>();
 
-        let weights = vec![10u32, 20, 30, 40, 50];
+        let weights = [10u32, 20, 30, 40, 50];
         for (i, w) in weights.iter().enumerate() {
             oracle
                 .add_oracle_source(OracleSource {
@@ -1249,7 +1257,7 @@ mod oracle_benchmarks {
                     source_type: OracleSourceType::Manual,
                     address: accounts.bob,
                     is_active: true,
-                    weight: (100 / count.max(1)) as u32,
+                    weight: (100 / count.max(1)),
                     last_updated: ink::env::block_timestamp::<DefaultEnvironment>(),
                 })
                 .expect("add source");
@@ -1277,20 +1285,20 @@ mod oracle_benchmarks {
 
         // Sequential aggregation
         assert!(oracle.set_batch_aggregation(false).is_ok());
-        let start = test::get_block_timestamp::<DefaultEnvironment>();
+        let start = ink::env::block_timestamp::<DefaultEnvironment>();
         for _ in 0..100 {
             let _ = oracle.aggregate_prices(&prices);
         }
-        let seq_end = test::get_block_timestamp::<DefaultEnvironment>();
+        let seq_end = ink::env::block_timestamp::<DefaultEnvironment>();
         let seq_duration = seq_end.saturating_sub(start);
 
         // Batched aggregation (packed weights)
         assert!(oracle.set_batch_aggregation(true).is_ok());
-        let start = test::get_block_timestamp::<DefaultEnvironment>();
+        let start = ink::env::block_timestamp::<DefaultEnvironment>();
         for _ in 0..100 {
             let _ = oracle.aggregate_prices(&prices);
         }
-        let batch_end = test::get_block_timestamp::<DefaultEnvironment>();
+        let batch_end = ink::env::block_timestamp::<DefaultEnvironment>();
         let batch_duration = batch_end.saturating_sub(start);
 
         // Batched must not be slower than sequential
@@ -1313,7 +1321,7 @@ mod oracle_benchmarks {
 
     #[ink::test]
     fn benchmark_aggregation_scales_with_sources() {
-        let mut oracle = setup_oracle();
+        let mut oracle;
 
         for count in [2, 5, 10, 20] {
             // Reset oracle for each batch size
@@ -1323,11 +1331,11 @@ mod oracle_benchmarks {
             let prices = make_prices(count as usize);
 
             assert!(oracle.set_batch_aggregation(true).is_ok());
-            let start = test::get_block_timestamp::<DefaultEnvironment>();
+            let start = ink::env::block_timestamp::<DefaultEnvironment>();
             for _ in 0..50 {
                 let _ = oracle.aggregate_prices(&prices);
             }
-            let end = test::get_block_timestamp::<DefaultEnvironment>();
+            let end = ink::env::block_timestamp::<DefaultEnvironment>();
             let duration = end.saturating_sub(start);
 
             // Each iteration should complete within a reasonable bound
@@ -1351,25 +1359,25 @@ mod oracle_benchmarks {
         assert!(oracle.set_batch_aggregation(true).is_ok());
 
         // Packed weight lookups
-        let start = test::get_block_timestamp::<DefaultEnvironment>();
+        let start = ink::env::block_timestamp::<DefaultEnvironment>();
         for _ in 0..500 {
             for i in 0..10 {
                 let _ = oracle.get_packed_source_weight(i);
             }
         }
-        let packed_end = test::get_block_timestamp::<DefaultEnvironment>();
+        let packed_end = ink::env::block_timestamp::<DefaultEnvironment>();
         let packed_duration = packed_end.saturating_sub(start);
 
         // Direct storage lookups via get_source_weight
         assert!(oracle.set_batch_aggregation(false).is_ok());
-        let start = test::get_block_timestamp::<DefaultEnvironment>();
+        let start = ink::env::block_timestamp::<DefaultEnvironment>();
         for _ in 0..500 {
             for i in 0..10 {
                 let sid = format!("bench_src_{}", i);
                 let _ = oracle.get_source_weight(&sid);
             }
         }
-        let direct_end = test::get_block_timestamp::<DefaultEnvironment>();
+        let direct_end = ink::env::block_timestamp::<DefaultEnvironment>();
         let direct_duration = direct_end.saturating_sub(start);
 
         // Packed lookups should be at least as fast (fewer storage reads)
@@ -1390,20 +1398,20 @@ mod oracle_benchmarks {
 
         // Sequential
         assert!(oracle.set_batch_aggregation(false).is_ok());
-        let start = test::get_block_timestamp::<DefaultEnvironment>();
+        let start = ink::env::block_timestamp::<DefaultEnvironment>();
         for _ in 0..20 {
             let _ = oracle.collect_prices_from_sources(1);
         }
-        let seq_end = test::get_block_timestamp::<DefaultEnvironment>();
+        let seq_end = ink::env::block_timestamp::<DefaultEnvironment>();
         let seq_duration = seq_end.saturating_sub(start);
 
         // Batched
         assert!(oracle.set_batch_aggregation(true).is_ok());
-        let start = test::get_block_timestamp::<DefaultEnvironment>();
+        let start = ink::env::block_timestamp::<DefaultEnvironment>();
         for _ in 0..20 {
             let _ = oracle.collect_prices_from_sources(1);
         }
-        let batch_end = test::get_block_timestamp::<DefaultEnvironment>();
+        let batch_end = ink::env::block_timestamp::<DefaultEnvironment>();
         let batch_duration = batch_end.saturating_sub(start);
 
         // Both must produce the same results

@@ -280,3 +280,74 @@ pub trait ServiceRegistry {
 /// internally and honours the `ServiceRegistry` interface. No methods are
 /// required — it exists purely for documentation and potential blanket impls.
 pub trait Injectable: ServiceRegistry {}
+
+#[cfg(test)]
+mod tests {
+    use ink::primitives::AccountId;
+
+    use super::*;
+
+    fn addr(byte: u8) -> AccountId {
+        AccountId::from([byte; 32])
+    }
+
+    #[test]
+    fn register_resolve_and_replace_services() {
+        let mut config = ContainerConfig::new();
+        assert!(!config.is_registered(ServiceKey::Oracle));
+
+        config
+            .register(ServiceKey::Oracle, addr(1))
+            .expect("register");
+        assert!(config.is_registered(ServiceKey::Oracle));
+        assert_eq!(config.resolve(ServiceKey::Oracle), Ok(addr(1)));
+
+        // Re-registering replaces the previous address.
+        config
+            .register(ServiceKey::Oracle, addr(2))
+            .expect("replace");
+        assert_eq!(config.resolve(ServiceKey::Oracle), Ok(addr(2)));
+    }
+
+    #[test]
+    fn zero_address_registration_is_rejected() {
+        let mut config = ContainerConfig::new();
+        assert_eq!(
+            config.register(ServiceKey::Bridge, AccountId::from([0u8; 32])),
+            Err(DependencyError::InvalidAddress)
+        );
+        assert!(!config.is_registered(ServiceKey::Bridge));
+    }
+
+    #[test]
+    fn unregistered_services_fail_resolution_until_registered() {
+        let mut config = ContainerConfig::new();
+        assert_eq!(
+            config.resolve(ServiceKey::Governance),
+            Err(DependencyError::ServiceNotRegistered)
+        );
+
+        config
+            .register(ServiceKey::Governance, addr(9))
+            .expect("register");
+        config.unregister(ServiceKey::Governance);
+        assert!(!config.is_registered(ServiceKey::Governance));
+    }
+
+    #[test]
+    fn list_registered_snapshots_only_active_services() {
+        let mut config = ContainerConfig::new();
+        config
+            .register(ServiceKey::Insurance, addr(4))
+            .expect("register");
+        config
+            .register(ServiceKey::FeeManager, addr(5))
+            .expect("register");
+
+        let listed = config.list_registered();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.contains(&(ServiceKey::Insurance, addr(4))));
+        assert!(listed.contains(&(ServiceKey::FeeManager, addr(5))));
+        assert!(!listed.iter().any(|(key, _)| *key == ServiceKey::Bridge));
+    }
+}

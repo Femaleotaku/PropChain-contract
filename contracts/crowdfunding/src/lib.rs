@@ -10,7 +10,7 @@
 use ink::storage::Mapping;
 
 #[ink::contract]
-mod propchain_crowdfunding {
+pub mod propchain_crowdfunding {
     use ink::prelude::string::String;
     use ink::prelude::vec::Vec;
 
@@ -39,6 +39,8 @@ mod propchain_crowdfunding {
         NoInvestmentFound,
         AccreditationNotVerified,
         InvalidParameters,
+        ValueMismatch,
+        ArithmeticOverflow,
     }
 
     impl From<propchain_traits::ReentrancyError> for CrowdfundingError {
@@ -147,6 +149,10 @@ mod propchain_crowdfunding {
         pub raised_amount: u128,
         pub status: CampaignStatus,
         pub investor_count: u32,
+        /// Block number when the campaign was created. Used to compute
+        /// days_active and funding velocity. Defaults to 0 for campaigns
+        /// created before this field was added.
+        pub created_at: u64,
     }
 
     #[derive(
@@ -314,9 +320,11 @@ mod propchain_crowdfunding {
         authorized_oracles: Mapping<AccountId, bool>,
         /// Tracks whether an investor has been refunded for a campaign
         refunds_issued: Mapping<(u64, AccountId), bool>,
+        /// List of investors per campaign, used to compute metrics like largest investment
+        campaign_investors: Mapping<u64, Vec<AccountId>>,
     }
 
-    // ── Events ───────────────────────────────────────────────
+    // â”€â”€ Events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[ink(event)]
     pub struct CampaignCreated {
@@ -421,11 +429,19 @@ mod propchain_crowdfunding {
                 reentrancy_guard: propchain_traits::ReentrancyGuard::new(),
                 authorized_oracles: Mapping::default(),
                 refunds_issued: Mapping::default(),
+                campaign_investors: Mapping::default(),
             }
         }
 
-        // ── Core Campaign Messages ───────────────────────────
+        // â”€â”€ Core Campaign Messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+        /// Creates a new crowdfunding campaign in Draft status.
+        ///
+        /// Callable by any account. The caller becomes the campaign creator.
+        /// The campaign starts in `Draft` status and must be activated before investments.
+        ///
+        /// # Errors
+        /// - Never fails under current logic, but returns `Result` for future extensibility.
         #[ink(message)]
         pub fn create_campaign(
             &mut self,
@@ -441,6 +457,7 @@ mod propchain_crowdfunding {
                 raised_amount: 0,
                 status: CampaignStatus::Draft,
                 investor_count: 0,
+                created_at: self.env().block_timestamp(),
             };
             self.campaigns.insert(self.campaign_count, &campaign);
             self.campaign_ids.push(self.campaign_count);
@@ -452,6 +469,14 @@ mod propchain_crowdfunding {
             Ok(self.campaign_count)
         }
 
+        /// Activates a campaign, changing its status from `Draft` to `Active` so that
+        /// investors can begin contributing funds.
+        ///
+        /// Callable only by the campaign creator or the contract admin.
+        ///
+        /// # Errors
+        /// - `CampaignNotFound` if `campaign_id` does not correspond to an existing campaign.
+        /// - `Unauthorized` if the caller is neither the campaign creator nor the admin.
         #[ink(message)]
         pub fn activate_campaign(&mut self, campaign_id: u64) -> Result<(), CrowdfundingError> {
             let mut campaign = self
@@ -466,6 +491,13 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Registers the caller as an investor with the given jurisdiction and accreditation status.
+        ///
+        /// Callable by any account (self-registration). The investor's KYC status is
+        /// automatically set to `Approved`.
+        ///
+        /// # Errors
+        /// - None under current logic; always succeeds.
         #[ink(message)]
         pub fn onboard_investor(
             &mut self,
@@ -514,7 +546,22 @@ mod propchain_crowdfunding {
                 .unwrap_or(false)
         }
 
-        #[ink(message)]
+        /// Invests funds into an active campaign. The investor must be KYC-approved,
+        /// accredited, and not from a blocked jurisdiction. Shares are minted at a rate
+        /// of 1 share per 1000 tokens invested.
+        ///
+        /// Callable by any onboarded and accredited investor. This is a payable message;
+        /// the transferred value must exactly equal the investment amount.
+        ///
+        /// # Errors
+        /// - `InvestorNotCompliant` if the caller is not onboarded, KYC is not approved,
+        ///   or their jurisdiction is blocked.
+        /// - `AccreditationNotVerified` if the investor has not been accredited.
+        /// - `CampaignNotFound` if the campaign does not exist.
+        /// - `CampaignNotActive` if the campaign is not in `Active` status.
+        /// - `ValueMismatch` if attached value differs from `amount`.
+        /// - `ArithmeticOverflow` if an investment or share total cannot be represented.
+        #[ink(message, payable)]
         pub fn invest(&mut self, campaign_id: u64, amount: u128) -> Result<(), CrowdfundingError> {
             let caller = self.env().caller();
             let profile = self
@@ -537,21 +584,47 @@ mod propchain_crowdfunding {
             if campaign.status != CampaignStatus::Active {
                 return Err(CrowdfundingError::CampaignNotActive);
             }
+            // The caller must actually transfer the value it wants booked.
+            // Exact-match policy: over-payment is rejected instead of refunded.
+            if self.env().transferred_value() != amount {
+                return Err(CrowdfundingError::ValueMismatch);
+            }
             let current = self.investments.get((campaign_id, caller)).unwrap_or(0);
+            // Compute every fallible total before touching storage so an
+            // overflowing investment reverts without partial ledger updates.
+            let new_investment_total = current
+                .checked_add(amount)
+                .ok_or(CrowdfundingError::ArithmeticOverflow)?;
+            let new_raised_amount = campaign
+                .raised_amount
+                .checked_add(amount)
+                .ok_or(CrowdfundingError::ArithmeticOverflow)?;
+            let shares =
+                u64::try_from(amount / 1000).map_err(|_| CrowdfundingError::ArithmeticOverflow)?;
+            let new_share_total = self
+                .share_holdings
+                .get((campaign_id, caller))
+                .unwrap_or(0)
+                .checked_add(shares)
+                .ok_or(CrowdfundingError::ArithmeticOverflow)?;
+
+            // All fallible arithmetic succeeded; commit the state transition.
             if current == 0 {
                 campaign.investor_count += 1;
+                // Track this investor for metrics computation
+                let mut investors = self.campaign_investors.get(campaign_id).unwrap_or_default();
+                investors.push(caller);
+                self.campaign_investors.insert(campaign_id, &investors);
             }
             self.investments
-                .insert((campaign_id, caller), &(current + amount));
-            campaign.raised_amount += amount;
+                .insert((campaign_id, caller), &new_investment_total);
+            campaign.raised_amount = new_raised_amount;
             if campaign.raised_amount >= campaign.target_amount {
                 campaign.status = CampaignStatus::Funded;
             }
             self.campaigns.insert(campaign_id, &campaign);
-            let shares = (amount / 1000) as u64;
-            let current_shares = self.share_holdings.get((campaign_id, caller)).unwrap_or(0);
             self.share_holdings
-                .insert((campaign_id, caller), &(current_shares + shares));
+                .insert((campaign_id, caller), &new_share_total);
             self.env().emit_event(InvestmentMade {
                 campaign_id,
                 investor: caller,
@@ -560,6 +633,14 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Adds a new milestone to an existing campaign with a description and capital release amount.
+        ///
+        /// Callable only by the campaign creator or the contract admin. The milestone
+        /// starts in `Pending` status and must be approved before it can be released.
+        ///
+        /// # Errors
+        /// - `CampaignNotFound` if the campaign does not exist.
+        /// - `Unauthorized` if the caller is neither the campaign creator nor the admin.
         #[ink(message)]
         pub fn add_milestone(
             &mut self,
@@ -585,12 +666,24 @@ mod propchain_crowdfunding {
                 oracle_data_hash: None,
             };
             self.milestones.insert(self.milestone_count, &milestone);
-            let total_milestones = self.campaign_milestone_counts.get(campaign_id).unwrap_or(0) + 1;
+            let total_milestones = self
+                .campaign_milestone_counts
+                .get(campaign_id)
+                .unwrap_or(0)
+                .saturating_add(1);
             self.campaign_milestone_counts
                 .insert(campaign_id, &total_milestones);
             Ok(self.milestone_count)
         }
 
+        /// Approves a milestone, changing its status from `Pending` to `Approved`,
+        /// which enables it to be released.
+        ///
+        /// Callable only by the contract admin.
+        ///
+        /// # Errors
+        /// - `Unauthorized` if the caller is not the admin.
+        /// - `MilestoneNotFound` if the milestone does not exist.
         #[ink(message)]
         pub fn approve_milestone(&mut self, milestone_id: u64) -> Result<(), CrowdfundingError> {
             if self.env().caller() != self.admin {
@@ -609,6 +702,16 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Releases an approved and oracle-verified milestone, transferring its release amount
+        /// from the campaign's raised funds. Updates milestone and capital release counters.
+        ///
+        /// Callable by any account. This is a **reentrant-call-safe** message.
+        ///
+        /// # Errors
+        /// - `MilestoneNotFound` if the milestone does not exist.
+        /// - `MilestoneNotApproved` if the milestone status is not `Approved`.
+        /// - `OracleVerificationFailed` if the milestone has not been verified by an oracle.
+        /// - `ReentrantCall` if a reentrant call is detected.
         #[ink(message)]
         pub fn release_milestone(&mut self, milestone_id: u64) -> Result<(), CrowdfundingError> {
             propchain_traits::non_reentrant!(self, {
@@ -737,6 +840,13 @@ mod propchain_crowdfunding {
                 .unwrap_or(false)
         }
 
+        /// Calculates the profit distribution for a specific investor in a campaign
+        /// based on their investment proportion relative to the campaign target.
+        ///
+        /// Callable by any account (read-only calculation). The returned value equals
+        /// `(total_profit * investor_amount) / target_amount`.
+        ///
+        /// Returns 0 if the campaign target is 0 or the investor has no investment.
         #[ink(message)]
         pub fn distribute_profit(
             &self,
@@ -752,6 +862,7 @@ mod propchain_crowdfunding {
                 raised_amount: 1,
                 status: CampaignStatus::Draft,
                 investor_count: 0,
+                created_at: 0,
             });
             let investment = self.investments.get((campaign_id, investor)).unwrap_or(0);
             if campaign.target_amount == 0 {
@@ -760,6 +871,13 @@ mod propchain_crowdfunding {
             (total_profit * investment) / campaign.target_amount
         }
 
+        /// Creates a new governance proposal for a campaign with a description.
+        ///
+        /// Callable by any account. The proposal starts in `Active` status and
+        /// can be voted on by eligible participants.
+        ///
+        /// # Errors
+        /// - `CampaignNotFound` if the campaign does not exist.
         #[ink(message)]
         pub fn create_proposal(
             &mut self,
@@ -786,6 +904,15 @@ mod propchain_crowdfunding {
             Ok(self.proposal_count)
         }
 
+        /// Casts a vote on an active proposal. Each voter can only vote once per proposal.
+        /// Vote weight is determined by the voter's stake in the associated campaign.
+        ///
+        /// Callable by any account. Not payable.
+        ///
+        /// # Errors
+        /// - `AlreadyVoted` if the caller has already voted on this proposal.
+        /// - `ProposalNotFound` if the proposal does not exist.
+        /// - `ProposalNotActive` if the proposal status is not `Active`.
         #[ink(message)]
         pub fn vote(&mut self, proposal_id: u64, in_favour: bool) -> Result<(), CrowdfundingError> {
             let caller = self.env().caller();
@@ -813,6 +940,13 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Finalizes a proposal by tallying votes and setting its status to `Passed`
+        /// (if more votes in favour) or `Rejected` (otherwise).
+        ///
+        /// Callable by any account. Once finalized, the proposal can no longer be voted on.
+        ///
+        /// # Errors
+        /// - `ProposalNotFound` if the proposal does not exist.
         #[ink(message)]
         pub fn finalize_proposal(
             &mut self,
@@ -831,6 +965,13 @@ mod propchain_crowdfunding {
             Ok(proposal.status)
         }
 
+        /// Lists shares for sale on the secondary market. The caller must hold at least
+        /// as many shares as they wish to list.
+        ///
+        /// Callable by any shareholder. Not payable.
+        ///
+        /// # Errors
+        /// - `InsufficientShares` if the caller does not hold enough shares in the campaign.
         #[ink(message)]
         pub fn list_shares(
             &mut self,
@@ -860,6 +1001,11 @@ mod propchain_crowdfunding {
             Ok(self.listing_count)
         }
 
+        /// Purchase shares from a share listing. The buyer pays the listing
+        /// price and receives the shares; the seller's holdings are reduced.
+        ///
+        /// - **Caller**: Any account.
+        /// - **Errors**: `ListingNotFound`.
         #[ink(message)]
         pub fn buy_shares(&mut self, listing_id: u64) -> Result<u128, CrowdfundingError> {
             let listing = self
@@ -880,14 +1026,19 @@ mod propchain_crowdfunding {
                 .share_holdings
                 .get((listing.campaign_id, buyer))
                 .unwrap_or(0);
-            self.share_holdings.insert(
-                (listing.campaign_id, buyer),
-                &(buyer_shares + listing.shares),
-            );
+            let new_buyer_shares = buyer_shares
+                .checked_add(listing.shares)
+                .ok_or(CrowdfundingError::ArithmeticOverflow)?;
+            self.share_holdings
+                .insert((listing.campaign_id, buyer), &new_buyer_shares);
             self.listings.remove(listing_id);
             Ok(total_cost)
         }
 
+        /// Record a campaign share on a social media platform. Emits a
+        /// `CampaignShared` event; no on-chain state change.
+        ///
+        /// - **Caller**: Any account.
         #[ink(message)]
         pub fn share_campaign(
             &mut self,
@@ -908,6 +1059,11 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Compute and store a risk profile for a campaign based on its
+        /// LTV ratio, developer score, and market volatility.
+        ///
+        /// - **Caller**: Admin only.
+        /// - **Errors**: `Unauthorized`.
         #[ink(message)]
         pub fn assess_risk(
             &mut self,
@@ -937,38 +1093,49 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
-        // ── Basic Getters ────────────────────────────────────
+        // â”€â”€ Basic Getters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+        /// Return a campaign by ID, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_campaign(&self, campaign_id: u64) -> Option<Campaign> {
             self.campaigns.get(campaign_id)
         }
 
+        /// Return the total investment amount for a campaign by a specific
+        /// investor, or `0` if the investor has not invested.
         #[ink(message)]
         pub fn get_investment(&self, campaign_id: u64, investor: AccountId) -> u128 {
             self.investments.get((campaign_id, investor)).unwrap_or(0)
         }
 
+        /// Return a milestone by ID, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_milestone(&self, milestone_id: u64) -> Option<Milestone> {
             self.milestones.get(milestone_id)
         }
 
+        /// Return a governance proposal by ID, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_proposal(&self, proposal_id: u64) -> Option<Proposal> {
             self.proposals.get(proposal_id)
         }
 
+        /// Return a share listing by ID, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_listing(&self, listing_id: u64) -> Option<ShareListing> {
             self.listings.get(listing_id)
         }
 
+        /// Return the risk profile for a campaign by ID, or `None` if unrated.
+        /// Return the risk profile for a campaign, or `None` if not assessed.
         #[ink(message)]
         pub fn get_risk_profile(&self, campaign_id: u64) -> Option<RiskProfile> {
             self.risk_profiles.get(campaign_id)
         }
 
+        /// Return comprehensive success metrics for a campaign by ID, or `None` if it does not exist.
+        /// Return computed success metrics for a campaign including funding
+        /// progress, average investment, milestone counts, and capital released.
         #[ink(message)]
         pub fn get_campaign_success_metrics(
             &self,
@@ -998,6 +1165,7 @@ mod propchain_crowdfunding {
             })
         }
 
+        /// Return the number of shares held by an investor in a campaign.
         #[ink(message)]
         pub fn get_shares(&self, campaign_id: u64, investor: AccountId) -> u64 {
             self.share_holdings
@@ -1005,12 +1173,13 @@ mod propchain_crowdfunding {
                 .unwrap_or(0)
         }
 
+        /// Return the admin account of this contract.
         #[ink(message)]
         pub fn get_admin(&self) -> AccountId {
             self.admin
         }
 
-        // ── Search & Discovery ───────────────────────────────
+        // â”€â”€ Search & Discovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
         fn campaign_to_summary(&self, campaign: &Campaign) -> CampaignSummary {
             let funded_pct = campaign
@@ -1190,7 +1359,7 @@ mod propchain_crowdfunding {
             self.campaign_count
         }
 
-        // ── Campaign Analytics for Creators ───────────────────
+        // â”€â”€ Campaign Analytics for Creators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
         /// Get comprehensive analytics for a campaign (creator only)
         #[ink(message)]
@@ -1213,22 +1382,15 @@ mod propchain_crowdfunding {
                 total_investment / total_investors as u128
             };
 
-            // Find largest investment
-            #[allow(unused_assignments)]
+            // Find largest investment by scanning the investment mapping for
+            // this campaign. Each entry is keyed by (campaign_id, investor).
             let mut largest_investment = 0u128;
-            for id in self.campaign_ids.iter() {
-                if let Some(investor) = self.campaigns.get(*id) {
-                    if investor.campaign_id == campaign_id {
-                        // This is inefficient, but we need to iterate through all investments
-                        // In a real implementation, we'd store this data
-                        break;
-                    }
+            for investor_id in self.campaign_investors.get(campaign_id).unwrap_or_default() {
+                let amount = self.investments.get((campaign_id, investor_id)).unwrap_or(0);
+                if amount > largest_investment {
+                    largest_investment = amount;
                 }
             }
-
-            // For now, we'll approximate largest investment
-            // TODO: Store max investment per campaign
-            largest_investment = average_investment * 2; // Placeholder
 
             let total_milestones = self.campaign_milestone_counts.get(campaign_id).unwrap_or(0);
             let released_milestones = self.released_milestone_counts.get(campaign_id).unwrap_or(0);
@@ -1237,14 +1399,21 @@ mod propchain_crowdfunding {
                 .checked_div(total_milestones)
                 .unwrap_or(0);
 
-            // Placeholder values for time-based metrics
-            // In a real implementation, we'd track timestamps
-            let days_active = 30; // Placeholder
-            let funding_velocity = if days_active == 0 {
-                0
+            // Compute days_active from the stored campaign creation timestamp.
+            // For campaigns created before this field existed (created_at == 0),
+            // fall back to 1 day to avoid division by zero.
+            let current_block = self.env().block_timestamp();
+            let days_active = if campaign.created_at > 0 && current_block > campaign.created_at {
+                // Convert block-time delta to days (assuming 6-second blocks).
+                // Use saturating subtraction to avoid underflow.
+                let elapsed_blocks = current_block.saturating_sub(campaign.created_at);
+                let elapsed_seconds = elapsed_blocks.saturating_mul(6);
+                let days = elapsed_seconds / 86_400;
+                if days == 0 { 1 } else { days }
             } else {
-                total_investment / days_active as u128
+                1 // Fallback: treat as 1 day old
             };
+            let funding_velocity = total_investment / days_active as u128;
 
             let investor_retention_rate = 8_000; // 80% placeholder
             let risk_score = self
@@ -1272,7 +1441,7 @@ mod propchain_crowdfunding {
                 average_investment,
                 largest_investment,
                 milestone_completion_rate,
-                days_active,
+                days_active: days_active as u32,
                 funding_velocity,
                 investor_retention_rate,
                 risk_score,
@@ -1433,7 +1602,9 @@ pub use crate::propchain_crowdfunding::{CrowdfundingError, RealEstateCrowdfundin
 mod tests {
     #[allow(unused_imports)]
     use ink::env::{test, DefaultEnvironment};
-    use propchain_crowdfunding::{CampaignStatus, CrowdfundingError, RealEstateCrowdfunding};
+    use propchain_crowdfunding::{
+        CampaignStatus, CrowdfundingError, MilestoneStatus, RealEstateCrowdfunding,
+    };
 
     use super::*;
 
@@ -1443,7 +1614,19 @@ mod tests {
         RealEstateCrowdfunding::new(accounts.alice)
     }
 
-    // ── Original tests ───────────────────────────────────────
+    /// Invests with the exact value attached, as `invest` now requires.
+    fn invest_with(
+        contract: &mut RealEstateCrowdfunding,
+        campaign_id: u64,
+        amount: u128,
+    ) -> Result<(), CrowdfundingError> {
+        test::set_value_transferred::<DefaultEnvironment>(amount);
+        let result = contract.invest(campaign_id, amount);
+        test::set_value_transferred::<DefaultEnvironment>(0);
+        result
+    }
+
+    // â”€â”€ Original tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[ink::test]
     fn test_create_campaign() {
@@ -1484,7 +1667,7 @@ mod tests {
         assert!(contract.is_accredited(accounts.bob));
         // Bob can now invest
         test::set_caller::<DefaultEnvironment>(accounts.bob);
-        assert!(contract.invest(campaign_id, 100_000).is_ok());
+        assert!(invest_with(&mut contract, campaign_id, 100_000).is_ok());
         let campaign = contract.get_campaign(campaign_id).unwrap();
         assert_eq!(campaign.status, CampaignStatus::Funded);
     }
@@ -1499,9 +1682,9 @@ mod tests {
         contract.activate_campaign(campaign_id).unwrap();
         test::set_caller::<DefaultEnvironment>(accounts.bob);
         contract.onboard_investor("US".into(), false).unwrap();
-        // Bob has not been accredited by admin — invest must fail
+        // Bob has not been accredited by admin â€” invest must fail
         assert_eq!(
-            contract.invest(campaign_id, 50_000),
+            invest_with(&mut contract, campaign_id, 50_000),
             Err(CrowdfundingError::AccreditationNotVerified)
         );
     }
@@ -1573,7 +1756,7 @@ mod tests {
         test::set_caller::<DefaultEnvironment>(accounts.alice);
         contract.verify_accreditation(accounts.bob).unwrap();
         test::set_caller::<DefaultEnvironment>(accounts.bob);
-        contract.invest(campaign_id, 40_000).unwrap();
+        invest_with(&mut contract, campaign_id, 40_000).unwrap();
         // Admin marks campaign as failed
         test::set_caller::<DefaultEnvironment>(accounts.alice);
         assert!(contract.fail_campaign(campaign_id).is_ok());
@@ -1597,7 +1780,7 @@ mod tests {
         test::set_caller::<DefaultEnvironment>(accounts.alice);
         contract.verify_accreditation(accounts.bob).unwrap();
         test::set_caller::<DefaultEnvironment>(accounts.bob);
-        contract.invest(campaign_id, 40_000).unwrap();
+        invest_with(&mut contract, campaign_id, 40_000).unwrap();
         // Refund should fail for active campaign
         assert_eq!(
             contract.claim_refund(campaign_id),
@@ -1618,7 +1801,7 @@ mod tests {
         test::set_caller::<DefaultEnvironment>(accounts.alice);
         contract.verify_accreditation(accounts.bob).unwrap();
         test::set_caller::<DefaultEnvironment>(accounts.bob);
-        contract.invest(campaign_id, 40_000).unwrap();
+        invest_with(&mut contract, campaign_id, 40_000).unwrap();
         test::set_caller::<DefaultEnvironment>(accounts.alice);
         contract.fail_campaign(campaign_id).unwrap();
         test::set_caller::<DefaultEnvironment>(accounts.bob);
@@ -1638,7 +1821,7 @@ mod tests {
         contract.activate_campaign(campaign_id).unwrap();
         test::set_caller::<DefaultEnvironment>(accounts.bob);
         contract.onboard_investor("US".into(), true).unwrap();
-        contract.invest(campaign_id, 60_000).unwrap();
+        invest_with(&mut contract, campaign_id, 60_000).unwrap();
         let payout = contract.distribute_profit(campaign_id, 10_000, accounts.bob);
         assert_eq!(payout, 6_000);
     }
@@ -1664,7 +1847,7 @@ mod tests {
         contract.activate_campaign(campaign_id).unwrap();
         test::set_caller::<DefaultEnvironment>(accounts.bob);
         contract.onboard_investor("US".into(), true).unwrap();
-        contract.invest(campaign_id, 50_000).unwrap();
+        invest_with(&mut contract, campaign_id, 50_000).unwrap();
         let listing_id = contract.list_shares(campaign_id, 25, 1_000).unwrap();
         test::set_caller::<DefaultEnvironment>(accounts.charlie);
         let cost = contract.buy_shares(listing_id).unwrap();
@@ -1691,11 +1874,11 @@ mod tests {
 
         test::set_caller::<DefaultEnvironment>(accounts.bob);
         contract.onboard_investor("US".into(), true).unwrap();
-        contract.invest(campaign_id, 50_000).unwrap();
+        invest_with(&mut contract, campaign_id, 50_000).unwrap();
 
         test::set_caller::<DefaultEnvironment>(accounts.charlie);
         contract.onboard_investor("CA".into(), true).unwrap();
-        contract.invest(campaign_id, 100_000).unwrap();
+        invest_with(&mut contract, campaign_id, 100_000).unwrap();
 
         test::set_caller::<DefaultEnvironment>(accounts.alice);
         let milestone_id = contract
@@ -1758,11 +1941,11 @@ mod tests {
         // Add some investments
         test::set_caller::<DefaultEnvironment>(accounts.bob);
         contract.onboard_investor("US".into(), true).unwrap();
-        contract.invest(campaign_id, 50_000).unwrap();
+        invest_with(&mut contract, campaign_id, 50_000).unwrap();
 
         test::set_caller::<DefaultEnvironment>(accounts.charlie);
         contract.onboard_investor("CA".into(), true).unwrap();
-        contract.invest(campaign_id, 100_000).unwrap();
+        invest_with(&mut contract, campaign_id, 100_000).unwrap();
 
         // Add milestone
         test::set_caller::<DefaultEnvironment>(accounts.alice);
@@ -1808,11 +1991,11 @@ mod tests {
         // Add investments from different investors
         test::set_caller::<DefaultEnvironment>(accounts.bob);
         contract.onboard_investor("US".into(), true).unwrap();
-        contract.invest(campaign_id, 100_000).unwrap();
+        invest_with(&mut contract, campaign_id, 100_000).unwrap();
 
         test::set_caller::<DefaultEnvironment>(accounts.charlie);
         contract.onboard_investor("CA".into(), true).unwrap();
-        contract.invest(campaign_id, 50_000).unwrap();
+        invest_with(&mut contract, campaign_id, 50_000).unwrap();
 
         // Creator gets demographics
         test::set_caller::<DefaultEnvironment>(accounts.alice);
@@ -1820,5 +2003,141 @@ mod tests {
         assert_eq!(demographics.total_investors, 2);
         assert_eq!(demographics.average_investment, 75_000);
         assert!(!demographics.jurisdictions.is_empty());
+    }
+
+    // -- Value-out paths: milestone release & refund eligibility (#977) --
+
+    /// Activates and funds a campaign exactly to target as `bob`.
+    fn fund_campaign_to_target(contract: &mut RealEstateCrowdfunding, campaign_id: u64) {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        contract.activate_campaign(campaign_id).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        contract.onboard_investor("US".into(), false).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        contract.verify_accreditation(accounts.bob).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        invest_with(contract, campaign_id, 100_000).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+    }
+
+    #[ink::test]
+    fn test_unauthorized_milestone_approval_rejected() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract.create_campaign("Approval Gate".into(), 100_000).unwrap();
+        let milestone_id = contract.add_milestone(campaign_id, "Framing".into(), 25_000).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        assert_eq!(contract.approve_milestone(milestone_id), Err(CrowdfundingError::Unauthorized));
+        assert_ne!(contract.get_milestone(milestone_id).unwrap().status, MilestoneStatus::Approved);
+    }
+
+    #[ink::test]
+    fn test_release_before_approval_rejected() {
+        let mut contract = setup();
+        let campaign_id = contract.create_campaign("Order Check".into(), 100_000).unwrap();
+        let milestone_id = contract.add_milestone(campaign_id, "Roofing".into(), 25_000).unwrap();
+        assert_eq!(contract.release_milestone(milestone_id), Err(CrowdfundingError::MilestoneNotApproved));
+    }
+
+    #[ink::test]
+    fn test_double_release_rejected_after_release() {
+        let mut contract = setup();
+        let campaign_id = contract.create_campaign("One Shot".into(), 100_000).unwrap();
+        let milestone_id = contract.add_milestone(campaign_id, "Handover".into(), 25_000).unwrap();
+        contract.oracle_verify_milestone(milestone_id, [7u8; 32]).unwrap();
+        contract.approve_milestone(milestone_id).unwrap();
+        contract.release_milestone(milestone_id).unwrap();
+        assert_eq!(contract.release_milestone(milestone_id), Err(CrowdfundingError::MilestoneNotApproved));
+    }
+
+    #[ink::test]
+    fn test_refund_rejected_for_funded_campaign() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract.create_campaign("Funded Tower".into(), 100_000).unwrap();
+        fund_campaign_to_target(&mut contract, campaign_id);
+        assert_eq!(contract.get_campaign(campaign_id).unwrap().status, CampaignStatus::Funded);
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(contract.claim_refund(campaign_id), Err(CrowdfundingError::CampaignNotFailed));
+        assert!(!contract.is_refunded(campaign_id, accounts.bob));
+    }
+
+    // -- Overflow-safe funding ledger (Issue #994) --
+
+    fn onboard_accredited_investor(
+        contract: &mut RealEstateCrowdfunding,
+        who: ink::primitives::AccountId,
+    ) {
+        test::set_caller::<DefaultEnvironment>(who);
+        contract.onboard_investor("US".into(), false).unwrap();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        contract.verify_accreditation(who).unwrap();
+        test::set_caller::<DefaultEnvironment>(who);
+    }
+
+    #[ink::test]
+    fn test_invest_amount_beyond_share_capacity_rejected_atomically() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract.create_campaign("Overflow Guard".into(), u128::MAX).unwrap();
+        contract.activate_campaign(campaign_id).unwrap();
+        onboard_accredited_investor(&mut contract, accounts.bob);
+        assert_eq!(invest_with(&mut contract, campaign_id, u128::MAX), Err(CrowdfundingError::ArithmeticOverflow));
+        assert_eq!(contract.get_investment(campaign_id, accounts.bob), 0);
+        let campaign = contract.get_campaign(campaign_id).unwrap();
+        assert_eq!(campaign.raised_amount, 0);
+        assert_eq!(campaign.status, CampaignStatus::Active);
+        invest_with(&mut contract, campaign_id, 10_000).unwrap();
+        assert_eq!(contract.get_investment(campaign_id, accounts.bob), 10_000);
+    }
+
+    #[ink::test]
+    fn test_share_ledger_accumulation_overflow_rejected() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract.create_campaign("Share Saturation".into(), u128::MAX).unwrap();
+        contract.activate_campaign(campaign_id).unwrap();
+        onboard_accredited_investor(&mut contract, accounts.bob);
+        let saturating_amount = u64::MAX as u128 * 1000;
+        invest_with(&mut contract, campaign_id, saturating_amount).expect("first investment within capacity");
+        assert_eq!(invest_with(&mut contract, campaign_id, 2_000), Err(CrowdfundingError::ArithmeticOverflow));
+        assert_eq!(contract.get_investment(campaign_id, accounts.bob), saturating_amount);
+        assert_eq!(contract.get_campaign(campaign_id).unwrap().raised_amount, saturating_amount);
+    }
+
+    #[ink::test]
+    fn test_invest_requires_exact_transferred_value() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract.create_campaign("Sunset Villas".into(), 100_000).unwrap();
+        contract.activate_campaign(campaign_id).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        contract.onboard_investor("US".into(), true).unwrap();
+        test::set_value_transferred::<DefaultEnvironment>(0);
+        assert_eq!(contract.invest(campaign_id, 50_000), Err(CrowdfundingError::ValueMismatch));
+        test::set_value_transferred::<DefaultEnvironment>(60_000);
+        assert_eq!(contract.invest(campaign_id, 50_000), Err(CrowdfundingError::ValueMismatch));
+        test::set_value_transferred::<DefaultEnvironment>(0);
+        invest_with(&mut contract, campaign_id, 50_000).unwrap();
+        assert_eq!(contract.get_investment(campaign_id, accounts.bob), 50_000);
+        assert_eq!(contract.get_shares(campaign_id, accounts.bob), 50);
+    }
+
+    #[ink::test]
+    fn test_invest_rejects_overflowing_amount() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract.create_campaign("Overflow Proof".into(), u128::MAX).unwrap();
+        contract.activate_campaign(campaign_id).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        contract.onboard_investor("US".into(), true).unwrap();
+        assert_eq!(invest_with(&mut contract, campaign_id, u128::MAX), Err(CrowdfundingError::ArithmeticOverflow));
+        assert_eq!(contract.get_investment(campaign_id, accounts.bob), 0);
+        assert_eq!(contract.get_shares(campaign_id, accounts.bob), 0);
+        let campaign = contract.get_campaign(campaign_id).unwrap();
+        assert_eq!(campaign.raised_amount, 0);
+        assert_eq!(campaign.investor_count, 0);
+        assert_eq!(campaign.status, CampaignStatus::Active);
     }
 }

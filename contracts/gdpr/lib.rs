@@ -7,7 +7,7 @@
 )]
 
 #[ink::contract]
-mod gdpr_consent {
+pub mod gdpr_consent {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
 
@@ -204,6 +204,16 @@ mod gdpr_consent {
 
         // ── Consent Management ──────────────────────────────────────────────
 
+        /// Grants consent for a data subject and processing purpose.
+        ///
+        /// Only the data subject themself may grant consent for their own
+        /// data; the contract admin may additionally record consent on behalf
+        /// of a subject (mirroring [`withdraw_consent`]'s authorization rule).
+        /// Any other caller is rejected with [`Error::NotAuthorized`] so
+        /// third parties cannot fabricate consent records in someone else's
+        /// name.
+        ///
+        /// Returns the id of the newly created [`ConsentRecord`].
         #[ink(message)]
         pub fn grant_consent(
             &mut self,
@@ -211,6 +221,11 @@ mod gdpr_consent {
             purpose: ProcessingPurpose,
             duration_ms: u64,
         ) -> Result<u64> {
+            let caller = self.env().caller();
+            if caller != data_subject && caller != self.admin {
+                return Err(Error::NotAuthorized);
+            }
+
             if duration_ms == 0 {
                 return Err(Error::InvalidDuration);
             }
@@ -566,6 +581,50 @@ mod gdpr_consent {
         }
 
         #[ink::test]
+        fn test_unauthorized_caller_cannot_grant_for_other() {
+            let mut contract = default_contract();
+            let subject = AccountId::from([0x02; 32]);
+            let attacker = AccountId::from([0x09; 32]);
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(attacker);
+            let result =
+                contract.grant_consent(subject, ProcessingPurpose::KYC, 365 * 24 * 60 * 60 * 1000);
+            assert_eq!(result, Err(Error::NotAuthorized));
+
+            // No fabricated consent record exists and processing checks stay false.
+            assert!(contract.get_subject_consents(subject).is_empty());
+            assert!(!contract.check_consent(subject, ProcessingPurpose::KYC));
+        }
+
+        #[ink::test]
+        fn test_subject_can_grant_own_consent() {
+            let mut contract = default_contract();
+            let subject = AccountId::from([0x02; 32]);
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(subject);
+            let id = contract
+                .grant_consent(subject, ProcessingPurpose::KYC, 365 * 24 * 60 * 60 * 1000)
+                .expect("self-grant");
+            let record = contract.get_consent(id).expect("should exist");
+            assert_eq!(record.data_subject, subject);
+            assert_eq!(record.status, ConsentStatus::Granted);
+            assert!(contract.check_consent(subject, ProcessingPurpose::KYC));
+        }
+
+        #[ink::test]
+        fn test_admin_can_grant_on_behalf_of_subject() {
+            let mut contract = default_contract(); // constructor caller is the admin
+            let subject = AccountId::from([0x02; 32]);
+
+            let id = contract
+                .grant_consent(subject, ProcessingPurpose::TaxReporting, 365 * 24 * 60 * 60 * 1000)
+                .expect("admin grant");
+            let record = contract.get_consent(id).expect("should exist");
+            assert_eq!(record.data_subject, subject);
+            assert!(contract.check_consent(subject, ProcessingPurpose::TaxReporting));
+        }
+
+        #[ink::test]
         fn test_subject_requests_list() {
             let mut contract = default_contract();
             let subject = AccountId::from([0x01; 32]);
@@ -573,6 +632,89 @@ mod gdpr_consent {
             contract.request_data_access().expect("request");
             let requests = contract.get_subject_requests(subject);
             assert_eq!(requests.len(), 2);
+        }
+
+        // ── Consent lifecycle: expiration & retention gating (#974) ────────
+
+        #[ink::test]
+        fn test_expire_consent_requires_admin() {
+            let mut contract = default_contract();
+            let subject = AccountId::from([0x02; 32]);
+            let id = contract
+                .grant_consent(subject, ProcessingPurpose::KYC, 1_000)
+                .expect("grant");
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(2_000);
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(subject);
+            assert_eq!(contract.expire_consent(id), Err(Error::NotAuthorized));
+        }
+
+        #[ink::test]
+        fn test_expire_consent_rejected_before_expiry() {
+            let mut contract = default_contract();
+            let id = contract
+                .grant_consent(AccountId::from([0x02; 32]), ProcessingPurpose::KYC, 10_000)
+                .expect("grant");
+            // Still inside its validity window, so expiry must be rejected.
+            assert_eq!(contract.expire_consent(id), Err(Error::ConsentNotFound));
+            let record = contract.get_consent(id).expect("should exist");
+            assert_eq!(record.status, ConsentStatus::Granted);
+        }
+
+        #[ink::test]
+        fn test_expire_consent_after_expiry_marks_expired() {
+            let mut contract = default_contract();
+            let subject = AccountId::from([0x02; 32]);
+            let id = contract
+                .grant_consent(subject, ProcessingPurpose::KYC, 1_000)
+                .expect("grant");
+            assert!(contract.check_consent(subject, ProcessingPurpose::KYC));
+
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(2_000);
+            // The consent is naturally stale for consumers...
+            assert!(!contract.check_consent(subject, ProcessingPurpose::KYC));
+            // ...and the admin can transition it to Expired.
+            contract.expire_consent(id).expect("expire after expiry");
+            let record = contract.get_consent(id).expect("should exist");
+            assert_eq!(record.status, ConsentStatus::Expired);
+
+            // Expiring again is rejected once it is no longer Granted.
+            assert_eq!(contract.expire_consent(id), Err(Error::ConsentNotFound));
+        }
+
+        #[ink::test]
+        fn test_retention_policy_requires_admin() {
+            let mut contract = default_contract();
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(AccountId::from([0x03; 32]));
+            assert_eq!(
+                contract.set_retention_policy(ProcessingPurpose::Marketing, 30, false),
+                Err(Error::NotAuthorized)
+            );
+            assert!(contract
+                .get_retention_policy(ProcessingPurpose::Marketing)
+                .is_none());
+        }
+
+        #[ink::test]
+        fn test_retention_policy_round_trip_and_overwrite() {
+            let mut contract = default_contract();
+            contract
+                .set_retention_policy(ProcessingPurpose::TransactionMonitoring, 90, false)
+                .expect("set policy");
+            let policy = contract
+                .get_retention_policy(ProcessingPurpose::TransactionMonitoring)
+                .expect("should exist");
+            assert_eq!(policy.retention_days, 90);
+            assert!(!policy.auto_delete);
+
+            // Re-setting the same purpose replaces the stored policy.
+            contract
+                .set_retention_policy(ProcessingPurpose::TransactionMonitoring, 180, true)
+                .expect("overwrite policy");
+            let policy = contract
+                .get_retention_policy(ProcessingPurpose::TransactionMonitoring)
+                .expect("should exist");
+            assert_eq!(policy.retention_days, 180);
+            assert!(policy.auto_delete);
         }
     }
 }

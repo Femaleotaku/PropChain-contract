@@ -5,12 +5,15 @@
 // Existing modules
 // =========================================================================
 pub mod access_control;
+pub mod bulk_remove;
+pub mod cache;
 pub mod constants;
 pub mod crypto;
 pub mod di;
 pub mod errors;
 pub mod randomness;
 pub mod reentrancy_guard;
+pub mod yield_position;
 
 pub mod types;
 pub use access_control::*;

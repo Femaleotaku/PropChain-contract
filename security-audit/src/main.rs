@@ -53,12 +53,18 @@ struct GasOptimizationResults {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct FormalVerificationResults {
+    /// Number of high-severity issues found by Slither static analyzer.
+    /// Only populated when Slither is available; defaults to 0 (not run).
     slither_high_issues: usize,
+    /// Errors from `cargo contract build` or similar tooling.
+    /// Only populated when the tool is available; defaults to 0 (not run).
     cargo_contract_errors: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct FuzzingResults {
+    /// Number of failures found by proptest or similar fuzzing harness.
+    /// Only populated when a fuzzing harness exists; defaults to 0 (not run).
     proptest_failures: usize,
 }
 
@@ -277,25 +283,25 @@ fn main() -> Result<()> {
                 if entry.path().extension().is_some_and(|ext| ext == "rs") {
                     let content = fs::read_to_string(entry.path()).unwrap_or_default();
 
-                    // Simple heuristics for Gas Optimization
-                    audit_report.gas_analysis.inefficient_loops +=
-                        content.matches("for ").count() / 3; // Basic heuristic
-                    audit_report.gas_analysis.storage_access_violations +=
-                        content.matches("Mapping::").count() / 2;
+                    // Gas optimization heuristics: count storage access patterns
+                    // that may indicate repeated reads (potential caching opportunities)
+                    // and large allocations that could be pre-sized.
                     audit_report.gas_analysis.large_allocations +=
-                        content.matches("Vec::with_capacity").count();
+                        content.matches("Vec::new()").count()
+                        + content.matches("Vec::with_capacity(0)").count();
+                    audit_report.gas_analysis.storage_access_violations +=
+                        content.matches(".get(").count().saturating_sub(1);
                 }
             }
 
-            // 5. Formal Verification & Fuzzing Info
+            // 5. Formal Verification & Fuzzing — requires external tooling
+            // (Slither, proptest) that is not part of this workspace.
+            // These fields remain at their Default (0) to indicate that
+            // formal verification and fuzzing were not run in this audit.
             println!(
                 "{}",
-                "Checking Formal Verification & Fuzzing (heuristic)...".yellow()
+                "Skipping Formal Verification & Fuzzing (external tools required)...".yellow()
             );
-            // This is indicative metrics gathering for the report
-            audit_report.formal_verification.cargo_contract_errors = 0; // Usually caught by actual PR checks
-            audit_report.formal_verification.slither_high_issues = 0;
-            audit_report.fuzzing.proptest_failures = 0;
 
             // Calculate Score
             // Calculate Score
@@ -311,7 +317,6 @@ fn main() -> Result<()> {
 
             audit_report.score = score;
 
-            println!("{}", "Audit Complete!".green().bold());
             println!("{}", "Audit Complete!".green().bold());
             println!("Security Score: {}/100", score);
             println!(

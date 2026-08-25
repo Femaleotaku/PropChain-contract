@@ -156,3 +156,73 @@ pub trait EventSubscriber {
         payload: EventPayload,
     ) -> Result<(), EventSubscriberError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use scale::{Decode, Encode};
+
+    use super::*;
+    use crate::errors::{ContractError, ErrorCategory};
+
+    fn sample_payload() -> EventPayload {
+        EventPayload {
+            emitter: ink::primitives::AccountId::from([7u8; 32]),
+            timestamp: 123_456,
+            data: ink::prelude::vec![1u8, 2, 3],
+        }
+    }
+
+    #[test]
+    fn event_payload_scale_round_trip_preserves_fields() {
+        let payload = sample_payload();
+        let encoded = payload.encode();
+        let decoded = EventPayload::decode(&mut encoded.as_slice()).expect("decodes");
+        assert_eq!(decoded.emitter, payload.emitter);
+        assert_eq!(decoded.timestamp, payload.timestamp);
+        assert_eq!(decoded.data, payload.data);
+    }
+
+    #[test]
+    fn empty_and_large_payloads_round_trip() {
+        let mut payload = sample_payload();
+        payload.data = Vec::new();
+        let decoded =
+            EventPayload::decode(&mut payload.encode().as_slice()).expect("decodes empty");
+        assert!(decoded.data.is_empty());
+
+        payload.data = vec![0xAB; 4096];
+        let decoded =
+            EventPayload::decode(&mut payload.encode().as_slice()).expect("decodes large");
+        assert_eq!(decoded.data.len(), 4096);
+    }
+
+    #[test]
+    fn event_bus_errors_expose_stable_metadata() {
+        assert_eq!(
+            EventBusError::TopicNotFound.to_string(),
+            "The specified topic does not exist"
+        );
+        assert_ne!(EventBusError::Unauthorized.error_code(), 0);
+        assert_eq!(
+            EventBusError::ReentrantCall.error_category(),
+            ErrorCategory::EventBus
+        );
+        assert_eq!(
+            EventBusError::AlreadySubscribed.error_i18n_key(),
+            "event_bus.already_subscribed"
+        );
+        // Every variant must carry a non-empty human description.
+        for error in [
+            EventBusError::Unauthorized,
+            EventBusError::TopicNotFound,
+            EventBusError::AlreadySubscribed,
+            EventBusError::NotSubscribed,
+            EventBusError::MaxSubscribersReached,
+            EventBusError::SubscriberCallFailed,
+            EventBusError::ReentrantCall,
+        ] {
+            assert!(!error.error_description().is_empty());
+            assert!(!error.error_i18n_key().is_empty());
+        }
+    }
+}

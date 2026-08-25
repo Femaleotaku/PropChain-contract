@@ -79,6 +79,10 @@ pub struct PremiumAuction {
     pub min_bid: u128,
     pub current_bid: u128,
     pub current_bidder: Option<AccountId>,
+    /// Native value currently held in custody for `current_bidder`.
+    /// Always equal to `current_bid` while the auction is active; zeroed
+    /// out on settlement (paid to the seller) so it can never be paid twice.
+    pub escrowed_value: u128,
     pub end_time: u64,
     pub settled: bool,
     pub fee_paid: u128,
