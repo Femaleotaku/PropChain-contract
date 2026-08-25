@@ -796,6 +796,18 @@ mod propchain_lending {
             }
         }
 
+        /// Assess and record collateral details for a property.
+        ///
+        /// Only callable by the contract admin.
+        ///
+        /// # Parameters
+        /// - `property_id`: unique property identifier.
+        /// - `value`: assessed value of the property.
+        /// - `ltv`: loan-to-value ratio in basis points (e.g. 7500 = 75%).
+        /// - `liq_threshold`: liquidation threshold in basis points (e.g. 12000 = 120%).
+        ///
+        /// # Errors
+        /// - `Unauthorized` if caller is not the admin.
         #[ink(message)]
         pub fn assess_collateral(
             &mut self,
@@ -822,6 +834,14 @@ mod propchain_lending {
             Ok(())
         }
 
+        /// Check whether a single-property collateral should be liquidated.
+        ///
+        /// Callable by anyone. Returns `true` when the ratio of assessed value
+        /// to current value exceeds the stored liquidation threshold.
+        ///
+        /// # Parameters
+        /// - `property_id`: property to evaluate.
+        /// - `current_value`: latest market value of the collateral.
         #[ink(message)]
         pub fn should_liquidate(&self, property_id: u64, current_value: u128) -> bool {
             if let Some(r) = self.collateral_records.get(property_id) {
@@ -832,6 +852,20 @@ mod propchain_lending {
             }
         }
 
+        /// Check whether a loan (possibly multi-collateral) should be liquidated.
+        ///
+        /// Callable by anyone. Computes the weighted liquidation threshold across
+        /// all pledged properties and compares it against the current aggregate
+        /// LTV (total debt / total current collateral value, both in native tokens).
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the active loan to evaluate.
+        /// - `current_collateral_values`: list of `(property_id, current_value)` pairs
+        ///   representing the latest market value for each pledged collateral.
+        ///
+        /// # Errors
+        /// - `LoanNotFound` if the loan does not exist.
+        /// - `PropertyNotFound` if a pledged property has no assessment record.
         #[ink(message)]
         pub fn should_liquidate_loan(
             &self,
@@ -892,6 +926,18 @@ mod propchain_lending {
             Ok(current_ltv > effective_threshold)
         }
 
+        /// Create a new lending pool with a given base interest rate.
+        ///
+        /// Only callable by the contract admin.
+        ///
+        /// # Parameters
+        /// - `base_rate`: base borrow rate in basis points (e.g. 500 = 5%).
+        ///
+        /// # Returns
+        /// The ID of the newly created pool.
+        ///
+        /// # Errors
+        /// - `Unauthorized` if caller is not the admin.
         #[ink(message)]
         pub fn create_pool(&mut self, base_rate: u32) -> Result<u64, LendingError> {
             if self.env().caller() != self.admin {
@@ -912,6 +958,18 @@ mod propchain_lending {
             Ok(self.pool_count)
         }
 
+        /// Deposit liquidity into a lending pool.
+        ///
+        /// Callable by anyone. The deposited amount increases the pool's total
+        /// deposits and available liquidity for borrowers.
+        ///
+        /// # Parameters
+        /// - `pool_id`: target lending pool.
+        /// - `amount`: number of tokens to deposit (in native token units).
+        ///
+        /// # Errors
+        /// - `PoolNotFound` if the pool does not exist.
+        /// - `ReentrantCall` if a re-entrant execution is detected.
         #[ink(message)]
         pub fn deposit(&mut self, pool_id: u64, amount: u128) -> Result<(), LendingError> {
             propchain_traits::non_reentrant!(self, {
@@ -922,6 +980,18 @@ mod propchain_lending {
             })
         }
 
+        /// Borrow liquidity from a lending pool.
+        ///
+        /// Callable by anyone, provided sufficient deposits are available.
+        ///
+        /// # Parameters
+        /// - `pool_id`: source lending pool.
+        /// - `amount`: number of tokens to borrow (in native token units).
+        ///
+        /// # Errors
+        /// - `PoolNotFound` if the pool does not exist.
+        /// - `InsufficientLiquidity` if available deposits are less than the requested amount.
+        /// - `ReentrantCall` if a re-entrant execution is detected.
         #[ink(message)]
         pub fn borrow(&mut self, pool_id: u64, amount: u128) -> Result<(), LendingError> {
             propchain_traits::non_reentrant!(self, {
@@ -935,6 +1005,19 @@ mod propchain_lending {
             })
         }
 
+        /// Query the current borrow rate for a lending pool.
+        ///
+        /// Callable by anyone. The rate equals the pool's base rate plus a
+        /// utilisation-dependent component (utilisation / 50, in basis points).
+        ///
+        /// # Parameters
+        /// - `pool_id`: the lending pool to query.
+        ///
+        /// # Returns
+        /// Current borrow rate in basis points (e.g. 700 = 7%).
+        ///
+        /// # Errors
+        /// - `PoolNotFound` if the pool does not exist.
         #[ink(message)]
         pub fn borrow_rate(&self, pool_id: u64) -> Result<u32, LendingError> {
             let pool = self.pools.get(pool_id).ok_or(LendingError::PoolNotFound)?;
@@ -944,6 +1027,18 @@ mod propchain_lending {
             Ok(pool.base_rate + (utilisation / 50) as u32)
         }
 
+        /// Open a leveraged margin position.
+        ///
+        /// Callable by anyone. The caller becomes the position owner.
+        ///
+        /// # Parameters
+        /// - `collateral`: collateral amount locked for the position (in native token units).
+        /// - `leverage`: leverage multiplier scaled by 100 (e.g. 200 = 2x).
+        /// - `short`: `true` for a short position, `false` for long.
+        /// - `price`: entry price of the underlying asset.
+        ///
+        /// # Returns
+        /// The ID of the newly created margin position.
         #[ink(message)]
         pub fn open_position(
             &mut self,
@@ -970,6 +1065,20 @@ mod propchain_lending {
             Ok(self.position_count)
         }
 
+        /// Compute the unrealised profit/loss for a margin position.
+        ///
+        /// Callable by anyone. PnL is calculated as
+        /// `(current_price - entry_price) * leverage / 100` (inverted for shorts).
+        ///
+        /// # Parameters
+        /// - `position_id`: ID of the margin position.
+        /// - `current_price`: latest market price of the underlying asset.
+        ///
+        /// # Returns
+        /// Signed PnL value (positive = profit, negative = loss).
+        ///
+        /// # Errors
+        /// - `PositionNotFound` if the position does not exist.
         #[ink(message)]
         pub fn position_pnl(
             &self,
@@ -985,6 +1094,22 @@ mod propchain_lending {
             Ok((signed * pos.leverage as i128) / 100)
         }
 
+        /// Apply for a variable-rate loan with default terms (12 months, 800 bps).
+        ///
+        /// Callable by any account. Creates a `LoanApplication` with status
+        /// `Pending` and `LoanType::Variable`.
+        ///
+        /// # Parameters
+        /// - `property_id`: property to associate with the loan.
+        /// - `requested_amount`: loan principal (in native token units).
+        /// - `collateral_value`: borrower-declared collateral value.
+        /// - `credit_score`: borrower credit score (overridden during underwriting).
+        ///
+        /// # Returns
+        /// The ID of the newly created loan application.
+        ///
+        /// # Errors
+        /// - `InvalidParameters` if any required parameter is zero.
         #[ink(message)]
         pub fn apply_for_loan(
             &mut self,
@@ -1003,6 +1128,24 @@ mod propchain_lending {
             )
         }
 
+        /// Apply for a fixed-rate loan with explicitly specified terms.
+        ///
+        /// Callable by any account. Creates a `LoanApplication` with status
+        /// `Pending` and `LoanType::FixedRate`.
+        ///
+        /// # Parameters
+        /// - `property_id`: property to associate with the loan.
+        /// - `requested_amount`: loan principal (in native token units).
+        /// - `collateral_value`: borrower-declared collateral value.
+        /// - `credit_score`: borrower credit score.
+        /// - `term_months`: loan term in months (e.g. 24 = 2 years).
+        /// - `interest_rate_bps`: fixed annual interest rate in basis points (e.g. 650 = 6.5%).
+        ///
+        /// # Returns
+        /// The ID of the newly created loan application.
+        ///
+        /// # Errors
+        /// - `InvalidParameters` if any required parameter is zero.
         #[ink(message)]
         pub fn apply_for_fixed_rate_loan(
             &mut self,
@@ -1046,6 +1189,24 @@ mod propchain_lending {
             Ok(self.loan_count)
         }
 
+        /// Apply for a variable-rate loan with explicitly specified terms.
+        ///
+        /// Callable by any account. Creates a `LoanApplication` with status
+        /// `Pending` and `LoanType::Variable`.
+        ///
+        /// # Parameters
+        /// - `property_id`: property to associate with the loan.
+        /// - `requested_amount`: loan principal (in native token units).
+        /// - `collateral_value`: borrower-declared collateral value.
+        /// - `credit_score`: borrower credit score.
+        /// - `term_months`: loan term in months (e.g. 12 = 1 year).
+        /// - `interest_rate_bps`: initial annual interest rate in basis points (e.g. 800 = 8%).
+        ///
+        /// # Returns
+        /// The ID of the newly created loan application.
+        ///
+        /// # Errors
+        /// - `InvalidParameters` if any required parameter is zero.
         #[ink(message)]
         pub fn apply_for_loan_with_terms(
             &mut self,
@@ -1089,6 +1250,26 @@ mod propchain_lending {
             Ok(self.loan_count)
         }
 
+        /// Apply for a loan backed by an already-assessed property.
+        ///
+        /// Callable by any account. The collateral value and LTV are derived from
+        /// the on-chain collateral record for the given property. The loan is
+        /// rejected if `requested_amount` exceeds `assessed_value * ltv_ratio / 10000`.
+        ///
+        /// # Parameters
+        /// - `property_id`: ID of an already-assessed property.
+        /// - `requested_amount`: loan principal (in native token units).
+        /// - `credit_score`: borrower credit score.
+        /// - `term_months`: loan term in months.
+        /// - `interest_rate_bps`: annual interest rate in basis points.
+        ///
+        /// # Returns
+        /// The ID of the newly created loan application.
+        ///
+        /// # Errors
+        /// - `PropertyNotFound` if no collateral record exists for the property.
+        /// - `InsufficientCollateral` if the requested amount exceeds the maximum
+        ///   allowable borrow or any required parameter is zero.
         #[ink(message)]
         pub fn apply_for_property_backed_loan(
             &mut self,
@@ -1139,6 +1320,22 @@ mod propchain_lending {
             Ok(self.loan_count)
         }
 
+        /// Underwrite (approve or reject) a pending loan application.
+        ///
+        /// Only callable by the contract admin. Uses the borrower's on-chain credit
+        /// score (minimum 600) and the LTV ratio (maximum 7500 bps = 75%) to
+        /// decide. Approved loans transition to `Active` and update the borrower's
+        /// credit profile.
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the loan application to underwrite.
+        ///
+        /// # Returns
+        /// `true` if approved, `false` if rejected.
+        ///
+        /// # Errors
+        /// - `Unauthorized` if caller is not the admin.
+        /// - `LoanNotFound` if the loan does not exist.
         #[ink(message)]
         pub fn underwrite_loan(&mut self, loan_id: u64) -> Result<bool, LendingError> {
             if self.env().caller() != self.admin {
@@ -1185,6 +1382,21 @@ mod propchain_lending {
             Ok(approved)
         }
 
+        /// Register a new loan servicer.
+        ///
+        /// Only callable by the contract admin. The servicer is created in an
+        /// active state and can be assigned to loans.
+        ///
+        /// # Parameters
+        /// - `account`: account address of the servicer.
+        /// - `name`: human-readable name for the servicer.
+        ///
+        /// # Returns
+        /// The ID of the newly registered servicer.
+        ///
+        /// # Errors
+        /// - `Unauthorized` if caller is not the admin.
+        /// - `InvalidParameters` if `name` is empty.
         #[ink(message)]
         pub fn register_loan_servicer(
             &mut self,
@@ -1219,6 +1431,18 @@ mod propchain_lending {
             Ok(self.servicer_count)
         }
 
+        /// Activate or deactivate a loan servicer.
+        ///
+        /// Only callable by the contract admin. Inactive servicers cannot be
+        /// assigned to new loans.
+        ///
+        /// # Parameters
+        /// - `servicer_id`: ID of the servicer to update.
+        /// - `active`: `true` to activate, `false` to deactivate.
+        ///
+        /// # Errors
+        /// - `Unauthorized` if caller is not the admin.
+        /// - `ServicerNotFound` if the servicer does not exist.
         #[ink(message)]
         pub fn set_loan_servicer_active(
             &mut self,
@@ -1237,6 +1461,21 @@ mod propchain_lending {
             Ok(())
         }
 
+        /// Assign an active loan servicer to a loan.
+        ///
+        /// Only callable by the contract admin. The loan's servicing status is
+        /// set to `"Boarded"` and the external reference is recorded.
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the loan.
+        /// - `servicer_id`: ID of an active servicer.
+        /// - `external_reference`: servicer-specific external reference identifier.
+        ///
+        /// # Errors
+        /// - `Unauthorized` if caller is not the admin.
+        /// - `LoanNotFound` if the loan does not exist.
+        /// - `ServicerNotFound` if the servicer does not exist.
+        /// - `InvalidParameters` if `external_reference` is empty or the servicer is inactive.
         #[ink(message)]
         pub fn assign_loan_servicer(
             &mut self,
@@ -1337,6 +1576,23 @@ mod propchain_lending {
             self.payment_schedules.get(schedule_id)
         }
 
+        /// Propose a loan restructuring with new terms.
+        ///
+        /// Callable by the loan's borrower or the contract admin. The loan must
+        /// be `Active` or `Restructured`. If the borrower proposes, their approval
+        /// is auto-set; likewise for the admin. Both approvals are needed for
+        /// the restructuring to take effect.
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the loan to restructure.
+        /// - `new_term_months`: proposed new term in months.
+        /// - `new_interest_rate_bps`: proposed new annual interest rate in basis points.
+        ///
+        /// # Errors
+        /// - `LoanNotFound` if the loan does not exist.
+        /// - `LoanNotActive` if the loan status is not `Active` or `Restructured`.
+        /// - `Unauthorized` if caller is neither the borrower nor the admin.
+        /// - `InvalidParameters` if either new term or rate is zero.
         #[ink(message)]
         pub fn propose_loan_restructuring(
             &mut self,
@@ -1380,6 +1636,20 @@ mod propchain_lending {
             Ok(())
         }
 
+        /// Update the servicing status string for a loan.
+        ///
+        /// Callable by the contract admin or the assigned servicer's account.
+        /// Also triggers an interest accrual snapshot before updating.
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the loan to update.
+        /// - `status`: new servicing status string (e.g. `"Current"`, `"Late"`).
+        ///
+        /// # Errors
+        /// - `LoanNotFound` if the loan does not exist.
+        /// - `ServicerNotFound` if no servicer is assigned or the servicer record is missing.
+        /// - `Unauthorized` if caller is neither the admin nor the servicer account.
+        /// - `InvalidParameters` if `status` is empty.
         #[ink(message)]
         pub fn update_servicing_status(
             &mut self,
@@ -1410,6 +1680,17 @@ mod propchain_lending {
             Ok(())
         }
 
+        /// Pledge an additional property as collateral for an existing loan.
+        ///
+        /// Callable by anyone. The property must have an existing collateral
+        /// assessment record. Duplicate pledges for the same property are ignored.
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the loan to add collateral to.
+        /// - `property_id`: ID of an assessed property to pledge.
+        ///
+        /// # Errors
+        /// - `PropertyNotFound` if no collateral record exists for the property.
         #[ink(message)]
         pub fn pledge_additional_collateral(
             &mut self,
@@ -1433,6 +1714,24 @@ mod propchain_lending {
             Ok(())
         }
 
+        /// Approve a pending loan restructuring.
+        ///
+        /// Callable by the loan's borrower (sets `borrower_approved`) or the
+        /// contract admin (sets `lender_approved`). Once both sides approve,
+        /// the loan's term and interest rate are updated and the restructuring
+        /// record is removed.
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the loan with a pending restructuring.
+        ///
+        /// # Returns
+        /// `true` if both parties have approved and the restructuring was applied,
+        /// `false` if only one party has approved so far.
+        ///
+        /// # Errors
+        /// - `LoanNotFound` if the loan does not exist.
+        /// - `RestructuringNotFound` if no restructuring proposal exists.
+        /// - `Unauthorized` if caller is neither the borrower nor the admin.
         #[ink(message)]
         pub fn approve_loan_restructuring(&mut self, loan_id: u64) -> Result<bool, LendingError> {
             let caller = self.env().caller();
@@ -1478,6 +1777,24 @@ mod propchain_lending {
             Ok(approved)
         }
 
+        /// Liquidate a loan whose collateral health has deteriorated or that has expired.
+        ///
+        /// Callable by anyone. The loan is liquidated if the aggregate LTV exceeds
+        /// the weighted liquidation threshold, or if a fixed-rate loan has passed
+        /// its maturity block. The loan status is set to `Liquidated`.
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the active loan to liquidate.
+        /// - `current_collateral_values`: list of `(property_id, current_value)` pairs
+        ///   representing the latest market value for each pledged collateral.
+        ///
+        /// # Errors
+        /// - `LoanNotFound` if the loan does not exist.
+        /// - `LoanNotActive` if the loan is not in `Active` status.
+        /// - `LiquidationThresholdNotMet` if the collateral health is still sufficient
+        ///   and the loan has not expired.
+        /// - `PropertyNotFound` if a pledged property has no assessment record.
+        /// - `InsufficientCollateral` if collateral data is missing or invalid.
         #[ink(message)]
         pub fn liquidate_loan(
             &mut self,
@@ -1560,6 +1877,13 @@ mod propchain_lending {
             Ok(())
         }
 
+        /// Stake tokens into the yield farming pool.
+        ///
+        /// Callable by anyone. Staked tokens accrue rewards at the configured
+        /// `reward_per_block` rate, proportional to the caller's share of total staked tokens.
+        ///
+        /// # Parameters
+        /// - `amount`: number of tokens to stake (in native token units).
         #[ink(message)]
         pub fn stake(&mut self, amount: u128) -> Result<(), LendingError> {
             let caller = self.env().caller();
@@ -1575,6 +1899,17 @@ mod propchain_lending {
             Ok(())
         }
 
+        /// Query pending yield-farming rewards for a staker.
+        ///
+        /// Callable by anyone. Returns the unclaimed reward tokens based on the
+        /// staker's share and the current block number.
+        ///
+        /// # Parameters
+        /// - `owner`: account address of the staker.
+        /// - `current_block`: block number to calculate rewards up to.
+        ///
+        /// # Returns
+        /// Pending reward amount in native token units (0 if no position exists).
         #[ink(message)]
         pub fn pending_rewards(&self, owner: AccountId, current_block: u64) -> u128 {
             if let Some(p) = self.yield_positions.get(owner) {
@@ -1588,6 +1923,16 @@ mod propchain_lending {
             }
         }
 
+        /// Create a new governance proposal.
+        ///
+        /// Callable by anyone. The proposal starts with zero votes and must be
+        /// voted on via `vote` before it can be executed.
+        ///
+        /// # Parameters
+        /// - `description`: human-readable description of the proposal.
+        ///
+        /// # Returns
+        /// The ID of the newly created proposal.
         #[ink(message)]
         pub fn propose(&mut self, description: String) -> Result<u64, LendingError> {
             self.proposal_count += 1;
@@ -1606,6 +1951,17 @@ mod propchain_lending {
             Ok(self.proposal_count)
         }
 
+        /// Cast a vote on a governance proposal.
+        ///
+        /// Callable by anyone. Each call increments either the for or against
+        /// vote count by one.
+        ///
+        /// # Parameters
+        /// - `proposal_id`: ID of the proposal to vote on.
+        /// - `in_favour`: `true` to vote in favour, `false` to vote against.
+        ///
+        /// # Errors
+        /// - `ProposalNotFound` if the proposal does not exist.
         #[ink(message)]
         pub fn vote(&mut self, proposal_id: u64, in_favour: bool) -> Result<(), LendingError> {
             let mut prop = self
@@ -1621,6 +1977,19 @@ mod propchain_lending {
             Ok(())
         }
 
+        /// Execute a governance proposal that has passed the vote.
+        ///
+        /// Callable by anyone. The proposal is executed (marked as `executed`)
+        /// only if `votes_for > votes_against` and it has not already been executed.
+        ///
+        /// # Parameters
+        /// - `proposal_id`: ID of the proposal to execute.
+        ///
+        /// # Returns
+        /// `true` if the proposal was executed, `false` otherwise (failed vote or already executed).
+        ///
+        /// # Errors
+        /// - `ProposalNotFound` if the proposal does not exist.
         #[ink(message)]
         pub fn execute_proposal(&mut self, proposal_id: u64) -> Result<bool, LendingError> {
             let mut prop = self
@@ -1701,26 +2070,56 @@ mod propchain_lending {
             Self::compute_credit_score(&profile)
         }
 
+        /// Retrieve a lending pool by its ID.
+        ///
+        /// Callable by anyone.
+        ///
+        /// # Parameters
+        /// - `pool_id`: ID of the pool to retrieve.
         #[ink(message)]
         pub fn get_pool(&self, pool_id: u64) -> Option<LendingPool> {
             self.pools.get(pool_id)
         }
 
+        /// Retrieve the collateral assessment record for a property.
+        ///
+        /// Callable by anyone.
+        ///
+        /// # Parameters
+        /// - `property_id`: ID of the property.
         #[ink(message)]
         pub fn get_collateral(&self, property_id: u64) -> Option<CollateralRecord> {
             self.collateral_records.get(property_id)
         }
 
+        /// Retrieve a margin position by its ID.
+        ///
+        /// Callable by anyone.
+        ///
+        /// # Parameters
+        /// - `position_id`: ID of the margin position.
         #[ink(message)]
         pub fn get_position(&self, position_id: u64) -> Option<MarginPosition> {
             self.margin_positions.get(position_id)
         }
 
+        /// Retrieve a loan application by its ID.
+        ///
+        /// Callable by anyone.
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the loan application.
         #[ink(message)]
         pub fn get_loan(&self, loan_id: u64) -> Option<LoanApplication> {
             self.loan_applications.get(loan_id)
         }
 
+        /// Retrieve a loan servicer by its ID.
+        ///
+        /// Callable by anyone.
+        ///
+        /// # Parameters
+        /// - `servicer_id`: ID of the servicer.
         #[ink(message)]
         pub fn get_loan_servicer(&self, servicer_id: u64) -> Option<LoanServicer> {
             self.loan_servicers.get(servicer_id)
@@ -1947,16 +2346,32 @@ mod propchain_lending {
             self.marketplace_offers.get(offer_id)
         }
 
+        /// Retrieve the pending restructuring proposal for a loan, if any.
+        ///
+        /// Callable by anyone. Returns `None` if no restructuring is pending
+        /// for the given loan.
+        ///
+        /// # Parameters
+        /// - `loan_id`: ID of the loan.
         #[ink(message)]
         pub fn get_loan_restructuring(&self, loan_id: u64) -> Option<LoanRestructuring> {
             self.loan_restructurings.get(loan_id)
         }
 
+        /// Retrieve a governance proposal by its ID.
+        ///
+        /// Callable by anyone.
+        ///
+        /// # Parameters
+        /// - `proposal_id`: ID of the proposal.
         #[ink(message)]
         pub fn get_proposal(&self, proposal_id: u64) -> Option<Proposal> {
             self.proposals.get(proposal_id)
         }
 
+        /// Retrieve the current contract admin account address.
+        ///
+        /// Callable by anyone.
         #[ink(message)]
         pub fn get_admin(&self) -> AccountId {
             self.admin

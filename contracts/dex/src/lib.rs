@@ -258,6 +258,20 @@ mod dex {
             instance
         }
 
+        /// Creates a new liquidity pool for a token pair with initial reserves and a swap fee.
+        ///
+        /// Anyone can call this to create a new pair. The caller receives LP shares proportional
+        /// to `sqrt(initial_base * initial_quote)`.
+        ///
+        /// - `base_token` / `quote_token`: the two token ids forming the pair (must differ).
+        /// - `fee_bips`: swap fee in basis points (0..999). Applied to every swap through this pool.
+        /// - `initial_base` / `initial_quote`: initial liquidity provided (both must be > 0).
+        ///
+        /// Returns the new `pair_id` on success.
+        ///
+        /// # Errors
+        /// - `InvalidPair` – identical tokens, zero amounts, fee >= 1000, or pair already exists.
+        /// - `ReentrantCall` – if called during a re-entrant context.
         #[ink(message)]
         pub fn create_pool(
             &mut self,
@@ -346,6 +360,20 @@ mod dex {
             })
         }
 
+        /// Deposits base and quote tokens into an existing liquidity pool and mints LP shares.
+        ///
+        /// Anyone with an existing pool can call this. LP shares are minted proportionally to
+        /// the smaller of the two deposit ratios relative to current reserves.
+        ///
+        /// - `pair_id`: the pool to add liquidity to.
+        /// - `amount_base` / `amount_quote`: amounts of each token to deposit (both must be > 0).
+        ///
+        /// Returns the number of LP shares minted.
+        ///
+        /// # Errors
+        /// - `InvalidPair` – zero deposit amounts.
+        /// - `PoolNotFound` – invalid `pair_id`.
+        /// - `ReentrantCall` – re-entrant context.
         #[ink(message)]
         pub fn add_liquidity(
             &mut self,
@@ -410,6 +438,21 @@ mod dex {
             })
         }
 
+        /// Burns LP shares and returns the proportional base and quote token amounts to the caller.
+        ///
+        /// The caller must hold at least `shares` LP tokens in the given pool.
+        /// Accrued liquidity mining rewards are settled before the withdrawal.
+        ///
+        /// - `pair_id`: the pool to withdraw from.
+        /// - `shares`: number of LP shares to burn (must be > 0 and ≤ caller's balance).
+        ///
+        /// Returns `(base_out, quote_out)` – the amounts of each token returned.
+        ///
+        /// # Errors
+        /// - `InvalidPair` – zero shares.
+        /// - `InsufficientLiquidity` – caller does not hold enough LP shares.
+        /// - `PoolNotFound` – invalid `pair_id`.
+        /// - `ReentrantCall` – re-entrant context.
         #[ink(message)]
         pub fn remove_liquidity(
             &mut self,
@@ -456,6 +499,23 @@ mod dex {
             })
         }
 
+        /// Swaps an exact amount of base tokens for quote tokens using the AMM curve.
+        ///
+        /// Applies the pool's fee (fee_bips) to the input. Emits a `PriceImpactWarning` event
+        /// when price impact exceeds 300 bips (3%). The caller receives governance token
+        /// rewards proportional to the trade volume.
+        ///
+        /// - `pair_id`: the pool to swap through.
+        /// - `amount_in`: exact amount of base tokens to sell (must be > 0).
+        /// - `min_quote_out`: minimum quote tokens the caller is willing to accept (slippage guard).
+        ///
+        /// Returns the amount of quote tokens received.
+        ///
+        /// # Errors
+        /// - `InvalidOrder` – zero input amount.
+        /// - `SlippageExceeded` – output is less than `min_quote_out`.
+        /// - `InsufficientLiquidity` – pool has no reserves.
+        /// - `ReentrantCall` – re-entrant context.
         #[ink(message)]
         pub fn swap_exact_base_for_quote(
             &mut self,
@@ -468,6 +528,23 @@ mod dex {
             })
         }
 
+        /// Swaps an exact amount of quote tokens for base tokens using the AMM curve.
+        ///
+        /// Applies the pool's fee (fee_bips) to the input. Emits a `PriceImpactWarning` event
+        /// when price impact exceeds 300 bips (3%). The caller receives governance token
+        /// rewards proportional to the trade volume.
+        ///
+        /// - `pair_id`: the pool to swap through.
+        /// - `amount_in`: exact amount of quote tokens to sell (must be > 0).
+        /// - `min_base_out`: minimum base tokens the caller is willing to accept (slippage guard).
+        ///
+        /// Returns the amount of base tokens received.
+        ///
+        /// # Errors
+        /// - `InvalidOrder` – zero input amount.
+        /// - `SlippageExceeded` – output is less than `min_base_out`.
+        /// - `InsufficientLiquidity` – pool has no reserves.
+        /// - `ReentrantCall` – re-entrant context.
         #[ink(message)]
         pub fn swap_exact_quote_for_base(
             &mut self,
@@ -480,6 +557,28 @@ mod dex {
             })
         }
 
+        /// Places a new order on the order book for a given pair.
+        ///
+        /// Supports Market, Limit, StopLoss, TakeProfit, and Twap order types with
+        /// TimeInForce options. Market, IOC, and FOK orders are executed immediately.
+        /// Limit orders remain on the book until matched or cancelled.
+        ///
+        /// - `pair_id`: the pool/pair to trade on.
+        /// - `side`: Buy or Sell.
+        /// - `order_type`: the kind of order (Market, Limit, StopLoss, TakeProfit, Twap).
+        /// - `time_in_force`: GTC, IOC, or FOK.
+        /// - `price`: limit price in basis points (required for Limit/StopLoss/TakeProfit, must be > 0).
+        /// - `amount`: total order size (must be > 0).
+        /// - `trigger_price`: optional trigger for stop/take-profit orders.
+        /// - `twap_interval`: optional interval for TWAP orders.
+        /// - `reduce_only`: if true, the order can only reduce an existing position.
+        ///
+        /// Returns the new `order_id`.
+        ///
+        /// # Errors
+        /// - `InvalidOrder` – zero amount or missing required price.
+        /// - `PoolNotFound` – invalid `pair_id`.
+        /// - `ReentrantCall` – re-entrant context.
         #[ink(message)]
         #[allow(clippy::too_many_arguments)]
         pub fn place_order(
@@ -552,6 +651,21 @@ mod dex {
             })
         }
 
+        /// Executes (fills) an existing open or partially-filled order.
+        ///
+        /// Fills up to `requested_amount` of the order's remaining size through the AMM pool.
+        /// The fill is subject to the order's executable conditions (e.g. price thresholds
+        /// for limit/stop/take-profit orders).
+        ///
+        /// - `order_id`: the order to execute.
+        /// - `requested_amount`: maximum amount to fill in this call (must be > 0).
+        ///
+        /// Returns the output amount from the underlying swap.
+        ///
+        /// # Errors
+        /// - `OrderNotExecutable` – order is not in an executable state or conditions are not met.
+        /// - `InvalidOrder` – fill amount is zero.
+        /// - `ReentrantCall` – re-entrant context.
         #[ink(message)]
         pub fn execute_order(
             &mut self,
@@ -605,6 +719,21 @@ mod dex {
             Ok(output)
         }
 
+        /// Directly matches a maker order against a taker order for the same pair.
+        ///
+        /// Both orders must be on the same pair and on opposite sides. The fill price
+        /// is taken from the maker's limit price (or the taker's if the maker has no price).
+        /// Analytics (TWAP, volume, volatility) are updated for the pair.
+        ///
+        /// - `maker_order_id`: the resting order on the book.
+        /// - `taker_order_id`: the incoming order to match against the maker.
+        /// - `amount`: number of base tokens to match (capped to the smaller remaining amount).
+        ///
+        /// Returns the notional value of the match (`fill_amount * execution_price / 10_000`).
+        ///
+        /// # Errors
+        /// - `InvalidOrder` – orders are on different pairs, same side, or fill amount is zero.
+        /// - `ReentrantCall` – re-entrant context.
         #[ink(message)]
         pub fn match_orders(
             &mut self,
@@ -672,6 +801,17 @@ mod dex {
             })
         }
 
+        /// Cancels an open or partially-filled order, removing it from the order book.
+        ///
+        /// Only the order's original trader or the contract admin may cancel.
+        /// Best bid/ask quotes are refreshed after cancellation.
+        ///
+        /// - `order_id`: the order to cancel.
+        ///
+        /// # Errors
+        /// - `Unauthorized` – caller is neither the trader nor the admin.
+        /// - `OrderNotFound` – invalid `order_id`.
+        /// - `ReentrantCall` – re-entrant context.
         #[ink(message)]
         pub fn cancel_order(&mut self, order_id: u64) -> Result<(), Error> {
             non_reentrant!(self, {
@@ -688,6 +828,18 @@ mod dex {
             })
         }
 
+        /// Configures a bridge route for cross-chain trades to a destination chain.
+        ///
+        /// Only the admin can call this. When an admin timelock delay is active,
+        /// this direct call is rejected and `schedule_bridge_route_update` must be used instead.
+        ///
+        /// - `destination_chain`: chain identifier for the bridge destination.
+        /// - `gas_estimate`: estimated gas cost for the bridge transfer.
+        /// - `protocol_fee`: protocol fee charged for cross-chain trades on this route.
+        ///
+        /// # Errors
+        /// - `Unauthorized` – caller is not the admin.
+        /// - `TimelockRequired` – a timelock delay is configured; use schedule instead.
         #[ink(message)]
         pub fn configure_bridge_route(
             &mut self,
@@ -705,6 +857,14 @@ mod dex {
             Ok(())
         }
 
+        /// Returns the current bridge fee quote for cross-chain trades to a given destination.
+        ///
+        /// - `destination_chain`: the chain identifier to query.
+        ///
+        /// Returns the `BridgeFeeQuote` containing gas estimate, protocol fee, and total fee.
+        ///
+        /// # Errors
+        /// - `InvalidBridgeRoute` – no route is configured for the given chain.
         #[ink(message)]
         pub fn quote_cross_chain_trade(
             &self,
@@ -715,6 +875,24 @@ mod dex {
                 .ok_or(Error::InvalidBridgeRoute)
         }
 
+        /// Creates a cross-chain trade intent that can later be bridged to another chain.
+        ///
+        /// The trade is created in `Pending` status. After creation, attach a bridge request
+        /// via `attach_bridge_request`, then finalize with `finalize_cross_chain_trade`.
+        ///
+        /// - `pair_id`: the pool to execute the swap on.
+        /// - `order_id`: optional linked order id.
+        /// - `destination_chain`: target chain for delivery.
+        /// - `recipient`: account on the destination chain to receive funds.
+        /// - `amount_in`: amount of source tokens to swap and bridge.
+        /// - `min_amount_out`: minimum amount expected on the destination (slippage guard).
+        ///
+        /// Returns the new `trade_id`.
+        ///
+        /// # Errors
+        /// - `InvalidBridgeRoute` – no route configured for `destination_chain`.
+        /// - `PoolNotFound` – invalid `pair_id`.
+        /// - `ReentrantCall` – re-entrant context.
         #[ink(message)]
         pub fn create_cross_chain_trade(
             &mut self,
@@ -755,6 +933,7 @@ mod dex {
             })
         }
 
+        /// Attach a bridge request to an existing cross-chain trade. The caller must be the original trade creator.
         #[ink(message)]
         pub fn attach_bridge_request(
             &mut self,
@@ -773,6 +952,7 @@ mod dex {
             })
         }
 
+        /// Finalize a cross-chain trade after the destination chain confirms delivery. Verifies the proof and completes the swap.
         #[ink(message)]
         pub fn finalize_cross_chain_trade(&mut self, trade_id: u64) -> Result<(), Error> {
             non_reentrant!(self, {
@@ -786,6 +966,7 @@ mod dex {
             })
         }
 
+        /// Create or update a liquidity mining campaign. Admin only. Parameters define reward rate, duration, and pool eligibility.
         #[ink(message)]
         pub fn set_liquidity_mining_campaign(
             &mut self,
@@ -815,6 +996,7 @@ mod dex {
             Ok(())
         }
 
+        /// Create a new trading competition. Admin only. Sets start/end timestamps, reward pool, and participant cap.
         #[ink(message)]
         pub fn create_trading_competition(
             &mut self,
@@ -860,11 +1042,13 @@ mod dex {
             Ok(competition_id)
         }
 
+        /// Return a trading competition by ID, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_trading_competition(&self, competition_id: u64) -> Option<TradingCompetition> {
             self.trading_competitions.get(competition_id)
         }
 
+        /// Return the trading volume and trade count for a participant in a competition.
         #[ink(message)]
         pub fn get_competition_score(&self, competition_id: u64, account: AccountId) -> u128 {
             self.competition_scores
@@ -872,6 +1056,7 @@ mod dex {
                 .unwrap_or(0)
         }
 
+        /// Claim reward tokens for a completed competition. Requires the competition to be finished.
         #[ink(message)]
         pub fn claim_competition_reward(&mut self, competition_id: u64) -> Result<u128, Error> {
             let competition = self
@@ -987,6 +1172,7 @@ mod dex {
             }
         }
 
+        /// Return the list of participant account IDs in a competition.
         #[ink(message)]
         pub fn list_competition_participants(&self, competition_id: u64) -> Vec<AccountId> {
             self.competition_participants
@@ -994,6 +1180,7 @@ mod dex {
                 .unwrap_or_default()
         }
 
+        /// Return all currently active trading competitions.
         #[ink(message)]
         pub fn get_active_competitions(&self) -> Vec<TradingCompetition> {
             let current_block = u64::from(self.env().block_number());
@@ -1011,6 +1198,7 @@ mod dex {
             active
         }
 
+        /// Return the top-N leaderboard entries sorted by trading volume for a competition.
         #[ink(message)]
         pub fn get_competition_leaderboard(&self, competition_id: u64) -> Vec<(AccountId, u128)> {
             let mut leaderboard = Vec::new();
@@ -1030,6 +1218,7 @@ mod dex {
             leaderboard
         }
 
+        /// Deactivate a trading competition early. Admin only. Sets the competition to Inactive status.
         #[ink(message)]
         pub fn deactivate_competition(&mut self, competition_id: u64) -> Result<(), Error> {
             if self.env().caller() != self.admin {
@@ -1045,6 +1234,7 @@ mod dex {
             Ok(())
         }
 
+        /// Activate a pending trading competition before its scheduled start. Admin only.
         #[ink(message)]
         pub fn activate_competition(&mut self, competition_id: u64) -> Result<(), Error> {
             if self.env().caller() != self.admin {
@@ -1060,6 +1250,7 @@ mod dex {
             Ok(())
         }
 
+        /// Mark a trading competition as completed and freeze its leaderboard. Admin only.
         #[ink(message)]
         pub fn complete_competition(&mut self, competition_id: u64) -> Result<(), Error> {
             if self.env().caller() != self.admin {
@@ -1076,6 +1267,7 @@ mod dex {
             Ok(())
         }
 
+        /// Return the reward token symbol for a competition.
         #[ink(message)]
         pub fn get_competition_reward_token_symbol(&self, competition_id: u64) -> Option<String> {
             self.trading_competitions
@@ -1083,6 +1275,7 @@ mod dex {
                 .map(|competition| competition.reward_token_symbol)
         }
 
+        /// Return the reward token amount per winner for a competition.
         #[ink(message)]
         pub fn get_competition_reward_amount(&self, competition_id: u64) -> Option<u128> {
             self.trading_competitions
@@ -1090,6 +1283,7 @@ mod dex {
                 .map(|competition| competition.reward_amount)
         }
 
+        /// Return the time remaining until a competition ends.
         #[ink(message)]
         pub fn get_competition_timer(&self, competition_id: u64) -> Option<(u64, u64)> {
             self.trading_competitions
@@ -1097,6 +1291,7 @@ mod dex {
                 .map(|competition| (competition.start_block, competition.end_block))
         }
 
+        /// Return whether a competition is currently active.
         #[ink(message)]
         pub fn is_competition_active(&self, competition_id: u64) -> bool {
             self.trading_competitions
@@ -1105,6 +1300,7 @@ mod dex {
                 .unwrap_or(false)
         }
 
+        /// Set the minimum trading volume required for competition eligibility. Admin only.
         #[ink(message)]
         pub fn set_competition_minimum_volume(
             &mut self,
@@ -1124,6 +1320,7 @@ mod dex {
             Ok(())
         }
 
+        /// Set the reward token amount per winner for a competition. Admin only.
         #[ink(message)]
         pub fn set_competition_reward_amount(
             &mut self,
@@ -1143,6 +1340,7 @@ mod dex {
             Ok(())
         }
 
+        /// Return the trading score for a specific participant in a competition.
         #[ink(message)]
         pub fn get_competition_participant_score(
             &self,
@@ -1154,6 +1352,7 @@ mod dex {
                 .unwrap_or(0)
         }
 
+        /// Return the number of participants in a competition.
         #[ink(message)]
         pub fn get_competition_participants_count(&self, competition_id: u64) -> u64 {
             self.competition_participants
@@ -1162,6 +1361,7 @@ mod dex {
                 .unwrap_or(0)
         }
 
+        /// Return the end block number of a competition.
         #[ink(message)]
         pub fn get_competition_end_block(&self, competition_id: u64) -> Option<u64> {
             self.trading_competitions
@@ -1169,6 +1369,7 @@ mod dex {
                 .map(|competition| competition.end_block)
         }
 
+        /// Return the start block number of a competition.
         #[ink(message)]
         pub fn get_competition_start_block(&self, competition_id: u64) -> Option<u64> {
             self.trading_competitions
@@ -1176,11 +1377,13 @@ mod dex {
                 .map(|competition| competition.start_block)
         }
 
+        /// Return full competition details including config and state.
         #[ink(message)]
         pub fn get_competition_details(&self, competition_id: u64) -> Option<TradingCompetition> {
             self.trading_competitions.get(competition_id)
         }
 
+        /// Return whether a participant has claimed their competition reward.
         #[ink(message)]
         pub fn is_competition_reward_claimed(
             &self,
@@ -1192,11 +1395,13 @@ mod dex {
                 .unwrap_or(false)
         }
 
+        /// Return the total number of players in a competition.
         #[ink(message)]
         pub fn get_competition_total_players(&self, competition_id: u64) -> u64 {
             self.get_competition_participants_count(competition_id)
         }
 
+        /// Return the top N participants sorted by score for a competition.
         #[ink(message)]
         pub fn get_competition_top_n(&self, competition_id: u64) -> Option<u32> {
             self.trading_competitions
@@ -1204,6 +1409,7 @@ mod dex {
                 .map(|competition| competition.top_n)
         }
 
+        /// Return the reward token symbol for a competition.
         #[ink(message)]
         pub fn get_competition_reward_symbol(&self, competition_id: u64) -> Option<String> {
             self.trading_competitions
@@ -1211,6 +1417,7 @@ mod dex {
                 .map(|competition| competition.reward_token_symbol)
         }
 
+        /// Return the title of a competition.
         #[ink(message)]
         pub fn get_competition_title(&self, competition_id: u64) -> Option<String> {
             self.trading_competitions
@@ -1218,6 +1425,7 @@ mod dex {
                 .map(|competition| competition.title)
         }
 
+        /// Return reward distribution info (amounts, recipients) for a competition.
         #[ink(message)]
         pub fn get_competition_reward_info(&self, competition_id: u64) -> Option<(u128, String)> {
             self.trading_competitions
@@ -1225,6 +1433,7 @@ mod dex {
                 .map(|competition| (competition.reward_amount, competition.reward_token_symbol))
         }
 
+        /// Return all competition IDs stored in the contract.
         #[ink(message)]
         pub fn get_all_competitions(&self) -> Vec<TradingCompetition> {
             let mut competitions = Vec::new();
@@ -1236,11 +1445,13 @@ mod dex {
             competitions
         }
 
+        /// Recompute and return the leaderboard for a competition.
         #[ink(message)]
         pub fn tally_competition_leaderboard(&self, competition_id: u64) -> Vec<(AccountId, u128)> {
             self.get_competition_leaderboard(competition_id)
         }
 
+        /// Return the current status of a competition.
         #[ink(message)]
         pub fn get_competition_status(&self, competition_id: u64) -> Option<(bool, u64, u64)> {
             self.trading_competitions
@@ -1254,11 +1465,13 @@ mod dex {
                 })
         }
 
+        /// Return the reward distribution state for a competition.
         #[ink(message)]
         pub fn get_competition_reward_state(&self, competition_id: u64) -> Option<bool> {
             Some(self.is_competition_reward_claimed(competition_id, self.env().caller()))
         }
 
+        /// Return the reward share percentage allocated to a specific trader in a competition.
         #[ink(message)]
         pub fn get_reward_share_for_trader(
             &self,
@@ -1297,6 +1510,7 @@ mod dex {
             )
         }
 
+        /// Return the aggregate trading score for a competition.
         #[ink(message)]
         pub fn get_competition_total_score(&self, competition_id: u64) -> u128 {
             let participants = self
@@ -1314,11 +1528,13 @@ mod dex {
             total_score
         }
 
+        /// Return the total number of competitions created.
         #[ink(message)]
         pub fn get_competition_count(&self) -> u64 {
             self.trade_competition_counter
         }
 
+        /// Return the reward claim status for a participant in a competition.
         #[ink(message)]
         pub fn get_competition_participant_reward_status(
             &self,
@@ -1328,11 +1544,13 @@ mod dex {
             self.is_competition_reward_claimed(competition_id, trader)
         }
 
+        /// Return the remaining reward balance for a competition.
         #[ink(message)]
         pub fn get_competition_reward_balance(&self, trader: AccountId) -> u128 {
             self.governance_balances.get(trader).unwrap_or(0)
         }
 
+        /// Return the configurable settings for a competition.
         #[ink(message)]
         pub fn get_competition_settings(&self, competition_id: u64) -> Option<(u32, u128)> {
             self.trading_competitions
@@ -1340,6 +1558,7 @@ mod dex {
                 .map(|competition| (competition.top_n, competition.min_trade_volume))
         }
 
+        /// Look up and return competition details by its title string.
         #[ink(message)]
         pub fn get_competition_details_by_title(&self, title: String) -> Vec<TradingCompetition> {
             let mut results = Vec::new();
@@ -1353,6 +1572,7 @@ mod dex {
             results
         }
 
+        /// Return a summary of all rewards distributed for a competition.
         #[ink(message)]
         pub fn get_competition_rewards_summary(&self, competition_id: u64) -> Option<(u128, bool)> {
             self.trading_competitions
@@ -1360,6 +1580,7 @@ mod dex {
                 .map(|competition| (competition.reward_amount, competition.active))
         }
 
+        /// Return a summary of competition statuses (active, pending, completed counts).
         #[ink(message)]
         pub fn get_competition_status_summary(
             &self,
@@ -1377,6 +1598,7 @@ mod dex {
                 })
         }
 
+        /// Return a full report of a competition including scores and rewards.
         #[ink(message)]
         pub fn get_competition_report(
             &self,
@@ -1394,6 +1616,7 @@ mod dex {
                 })
         }
 
+        /// Return the metadata (title, description, timestamps) for a competition.
         #[ink(message)]
         pub fn get_competition_metadata(&self, competition_id: u64) -> Option<String> {
             self.trading_competitions
@@ -1401,6 +1624,7 @@ mod dex {
                 .map(|competition| competition.title)
         }
 
+        /// Return a user-specific summary of their participation across competitions.
         #[ink(message)]
         pub fn get_competition_summary_for_user(
             &self,
@@ -1416,6 +1640,7 @@ mod dex {
             }
         }
 
+        /// Return a summary overview of all competitions.
         #[ink(message)]
         pub fn get_competition_summary_all(&self) -> Vec<(u64, bool, u128)> {
             let mut list = Vec::new();
@@ -1427,11 +1652,13 @@ mod dex {
             list
         }
 
+        /// Return the final scores for a completed competition.
         #[ink(message)]
         pub fn get_competition_final_scores(&self, competition_id: u64) -> Vec<(AccountId, u128)> {
             self.get_competition_leaderboard(competition_id)
         }
 
+        /// Return the target trading volume goal for a competition.
         #[ink(message)]
         pub fn get_competition_trade_volume_goal(&self, competition_id: u64) -> Option<u128> {
             self.trading_competitions
@@ -1439,6 +1666,7 @@ mod dex {
                 .map(|competition| competition.min_trade_volume)
         }
 
+        /// Return the reward distribution record for a competition.
         #[ink(message)]
         pub fn get_competition_reward_distribution(
             &self,
@@ -1449,6 +1677,7 @@ mod dex {
                 .map(|competition| (competition.reward_amount, competition.top_n))
         }
 
+        /// Return competition details formatted for dashboard display.
         #[ink(message)]
         pub fn get_competition_details_for_dashboard(
             &self,
@@ -1465,11 +1694,13 @@ mod dex {
                 })
         }
 
+        /// Return the historical list of past competitions.
         #[ink(message)]
         pub fn get_competition_history(&self) -> Vec<TradingCompetition> {
             self.get_all_competitions()
         }
 
+        /// Return the description of a competition.
         #[ink(message)]
         pub fn get_competition_description(&self, competition_id: u64) -> Option<String> {
             self.trading_competitions
@@ -1477,6 +1708,7 @@ mod dex {
                 .map(|competition| competition.title)
         }
 
+        /// Return the rank of a participant within a competition leaderboard.
         #[ink(message)]
         pub fn get_competition_rank(&self, competition_id: u64, trader: AccountId) -> Option<u64> {
             let mut leaderboard = self.get_competition_leaderboard(competition_id);
@@ -1490,21 +1722,25 @@ mod dex {
             None
         }
 
+        /// Return the top scores across all competitions.
         #[ink(message)]
         pub fn get_competition_top_scores(&self, competition_id: u64) -> Vec<(AccountId, u128)> {
             self.get_competition_leaderboard(competition_id)
         }
 
+        /// Return whether a competition is currently active.
         #[ink(message)]
         pub fn get_competition_active_status(&self, competition_id: u64) -> bool {
             self.is_competition_active(competition_id)
         }
 
+        /// Return the admin account that created a competition.
         #[ink(message)]
         pub fn get_competition_admin(&self, _competition_id: u64) -> AccountId {
             self.admin
         }
 
+        /// Claim accumulated liquidity mining rewards for a pool. Burns the caller's reward accumulator and transfers tokens.
         #[ink(message)]
         pub fn claim_liquidity_rewards(&mut self, pair_id: u64) -> Result<u128, Error> {
             self.accrue_rewards(pair_id)?;
@@ -1533,6 +1769,7 @@ mod dex {
             Ok(reward)
         }
 
+        /// Return the pending liquidity mining rewards for an account in a given pool.
         #[ink(message)]
         pub fn pending_liquidity_rewards(
             &self,
@@ -1544,6 +1781,7 @@ mod dex {
             Ok(self.pending_liquidity_rewards_for(&pool, &position, pair_id))
         }
 
+        /// Return the liquidity position details for an account in a pool.
         #[ink(message)]
         pub fn get_liquidity_position(
             &self,
@@ -1553,11 +1791,13 @@ mod dex {
             self.position(pair_id, provider)
         }
 
+        /// Return a liquidity mining campaign by pool ID, or `None` if inactive.
         #[ink(message)]
         pub fn get_liquidity_mining_campaign(&self) -> LiquidityMiningCampaign {
             self.liquidity_mining.clone()
         }
 
+        /// Create a governance proposal for parameter changes. Caller must hold governance tokens.
         #[ink(message)]
         pub fn create_governance_proposal(
             &mut self,
@@ -1596,6 +1836,7 @@ mod dex {
             })
         }
 
+        /// Cast a vote on an active governance proposal. One vote per token holder.
         #[ink(message)]
         pub fn vote_on_proposal(&mut self, proposal_id: u64, support: bool) -> Result<(), Error> {
             non_reentrant!(self, {
@@ -1623,6 +1864,7 @@ mod dex {
             })
         }
 
+        /// Execute a governance proposal that has passed its voting period with sufficient support.
         #[ink(message)]
         pub fn execute_governance_proposal(&mut self, proposal_id: u64) -> Result<bool, Error> {
             non_reentrant!(self, {
@@ -1649,21 +1891,25 @@ mod dex {
             })
         }
 
+        /// Return pool details by token pair ID.
         #[ink(message)]
         pub fn get_pool(&self, pair_id: u64) -> Option<LiquidityPool> {
             self.pools.get(pair_id)
         }
 
+        /// Return an order by ID.
         #[ink(message)]
         pub fn get_order(&self, order_id: u64) -> Option<TradingOrder> {
             self.orders.get(order_id)
         }
 
+        /// Return analytics data for a trading pair including volume and TVL.
         #[ink(message)]
         pub fn get_pair_analytics(&self, pair_id: u64) -> Option<PairAnalytics> {
             self.analytics.get(pair_id)
         }
 
+        /// Discover the current mid-market price for a token pair.
         #[ink(message)]
         pub fn discover_price(&self, pair_id: u64) -> Result<u128, Error> {
             let analytics = self.analytics_for(pair_id);
@@ -1680,6 +1926,7 @@ mod dex {
             ))
         }
 
+        /// Return a portfolio snapshot for an account including balances and P&L.
         #[ink(message)]
         pub fn get_portfolio_snapshot(&self, account: AccountId) -> PortfolioSnapshot {
             let mut liquidity_positions = 0u64;
@@ -1808,16 +2055,19 @@ mod dex {
             Ok((price_impact_bips, amount_out))
         }
 
+        /// Return the governance token balance of an account.
         #[ink(message)]
         pub fn get_governance_balance(&self, account: AccountId) -> u128 {
             self.governance_balances.get(account).unwrap_or(0)
         }
 
+        /// Return the current admin timelock delay in blocks.
         #[ink(message)]
         pub fn get_admin_timelock_delay(&self) -> u64 {
             self.admin_timelock_delay
         }
 
+        /// Set the admin timelock delay. Admin only. Changes take effect after the current timelock expires.
         #[ink(message)]
         pub fn set_admin_timelock_delay(&mut self, delay_blocks: u64) -> Result<(), Error> {
             if self.env().caller() != self.admin {
@@ -1830,6 +2080,7 @@ mod dex {
             Ok(())
         }
 
+        /// Schedule a bridge route configuration update after the timelock delay.
         #[ink(message)]
         pub fn schedule_bridge_route_update(
             &mut self,
@@ -1846,6 +2097,7 @@ mod dex {
             self.schedule_admin_action_internal(AdminActionKind::ConfigureBridgeRoute, payload)
         }
 
+        /// Schedule a liquidity mining campaign update after the timelock delay.
         #[ink(message)]
         pub fn schedule_liquidity_mining_update(
             &mut self,
@@ -1870,6 +2122,7 @@ mod dex {
             self.schedule_admin_action_internal(AdminActionKind::SetLiquidityMining, payload)
         }
 
+        /// Schedule a timelock delay change after the current timelock expires.
         #[ink(message)]
         pub fn schedule_timelock_delay_update(&mut self, delay_blocks: u64) -> Result<u64, Error> {
             let payload = AdminActionPayload {
@@ -1879,6 +2132,7 @@ mod dex {
             self.schedule_admin_action_internal(AdminActionKind::UpdateTimelockDelay, payload)
         }
 
+        /// Execute a previously scheduled admin action after its timelock has elapsed.
         #[ink(message)]
         pub fn execute_admin_action(&mut self, action_id: u64) -> Result<(), Error> {
             if self.env().caller() != self.admin {
@@ -1923,6 +2177,7 @@ mod dex {
             Ok(())
         }
 
+        /// Cancel a pending scheduled admin action. Admin only.
         #[ink(message)]
         pub fn cancel_admin_action(&mut self, action_id: u64) -> Result<(), Error> {
             if self.env().caller() != self.admin {
@@ -1941,6 +2196,7 @@ mod dex {
             Ok(())
         }
 
+        /// Return the details of a scheduled admin action by ID.
         #[ink(message)]
         pub fn get_scheduled_admin_action(&self, action_id: u64) -> Option<PendingAdminAction> {
             self.pending_admin_actions.get(action_id)
@@ -2024,6 +2280,7 @@ mod dex {
             Ok(())
         }
 
+        /// Return a snapshot of the order book for a pair including bids and asks.
         #[ink(message)]
         pub fn get_order_book_snapshot(
             &self,
@@ -2071,6 +2328,7 @@ mod dex {
             })
         }
 
+        /// Return aggregated order book price levels for a pair.
         #[ink(message)]
         pub fn get_order_book_levels(
             &self,

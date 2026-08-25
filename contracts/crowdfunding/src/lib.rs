@@ -425,6 +425,13 @@ mod propchain_crowdfunding {
 
         // ── Core Campaign Messages ───────────────────────────
 
+        /// Creates a new crowdfunding campaign in Draft status.
+        ///
+        /// Callable by any account. The caller becomes the campaign creator.
+        /// The campaign starts in `Draft` status and must be activated before investments.
+        ///
+        /// # Errors
+        /// - Never fails under current logic, but returns `Result` for future extensibility.
         #[ink(message)]
         pub fn create_campaign(
             &mut self,
@@ -451,6 +458,14 @@ mod propchain_crowdfunding {
             Ok(self.campaign_count)
         }
 
+        /// Activates a campaign, changing its status from `Draft` to `Active` so that
+        /// investors can begin contributing funds.
+        ///
+        /// Callable only by the campaign creator or the contract admin.
+        ///
+        /// # Errors
+        /// - `CampaignNotFound` if `campaign_id` does not correspond to an existing campaign.
+        /// - `Unauthorized` if the caller is neither the campaign creator nor the admin.
         #[ink(message)]
         pub fn activate_campaign(&mut self, campaign_id: u64) -> Result<(), CrowdfundingError> {
             let mut campaign = self
@@ -465,6 +480,13 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Registers the caller as an investor with the given jurisdiction and accreditation status.
+        ///
+        /// Callable by any account (self-registration). The investor's KYC status is
+        /// automatically set to `Approved`.
+        ///
+        /// # Errors
+        /// - None under current logic; always succeeds.
         #[ink(message)]
         pub fn onboard_investor(
             &mut self,
@@ -513,6 +535,19 @@ mod propchain_crowdfunding {
                 .unwrap_or(false)
         }
 
+        /// Invests funds into an active campaign. The investor must be KYC-approved,
+        /// accredited, and not from a blocked jurisdiction. Shares are minted at a rate
+        /// of 1 share per 1000 tokens invested.
+        ///
+        /// Callable by any onboarded and accredited investor. This is a **payable** message;
+        /// the transferred value is the investment amount.
+        ///
+        /// # Errors
+        /// - `InvestorNotCompliant` if the caller is not onboarded, KYC is not approved,
+        ///   or their jurisdiction is blocked.
+        /// - `AccreditationNotVerified` if the investor has not been accredited.
+        /// - `CampaignNotFound` if the campaign does not exist.
+        /// - `CampaignNotActive` if the campaign is not in `Active` status.
         #[ink(message)]
         pub fn invest(&mut self, campaign_id: u64, amount: u128) -> Result<(), CrowdfundingError> {
             let caller = self.env().caller();
@@ -559,6 +594,14 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Adds a new milestone to an existing campaign with a description and capital release amount.
+        ///
+        /// Callable only by the campaign creator or the contract admin. The milestone
+        /// starts in `Pending` status and must be approved before it can be released.
+        ///
+        /// # Errors
+        /// - `CampaignNotFound` if the campaign does not exist.
+        /// - `Unauthorized` if the caller is neither the campaign creator nor the admin.
         #[ink(message)]
         pub fn add_milestone(
             &mut self,
@@ -590,6 +633,14 @@ mod propchain_crowdfunding {
             Ok(self.milestone_count)
         }
 
+        /// Approves a milestone, changing its status from `Pending` to `Approved`,
+        /// which enables it to be released.
+        ///
+        /// Callable only by the contract admin.
+        ///
+        /// # Errors
+        /// - `Unauthorized` if the caller is not the admin.
+        /// - `MilestoneNotFound` if the milestone does not exist.
         #[ink(message)]
         pub fn approve_milestone(&mut self, milestone_id: u64) -> Result<(), CrowdfundingError> {
             if self.env().caller() != self.admin {
@@ -608,6 +659,16 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Releases an approved and oracle-verified milestone, transferring its release amount
+        /// from the campaign's raised funds. Updates milestone and capital release counters.
+        ///
+        /// Callable by any account. This is a **reentrant-call-safe** message.
+        ///
+        /// # Errors
+        /// - `MilestoneNotFound` if the milestone does not exist.
+        /// - `MilestoneNotApproved` if the milestone status is not `Approved`.
+        /// - `OracleVerificationFailed` if the milestone has not been verified by an oracle.
+        /// - `ReentrantCall` if a reentrant call is detected.
         #[ink(message)]
         pub fn release_milestone(&mut self, milestone_id: u64) -> Result<(), CrowdfundingError> {
             propchain_traits::non_reentrant!(self, {
@@ -736,6 +797,13 @@ mod propchain_crowdfunding {
                 .unwrap_or(false)
         }
 
+        /// Calculates the profit distribution for a specific investor in a campaign
+        /// based on their investment proportion relative to the campaign target.
+        ///
+        /// Callable by any account (read-only calculation). The returned value equals
+        /// `(total_profit * investor_amount) / target_amount`.
+        ///
+        /// Returns 0 if the campaign target is 0 or the investor has no investment.
         #[ink(message)]
         pub fn distribute_profit(
             &self,
@@ -759,6 +827,13 @@ mod propchain_crowdfunding {
             (total_profit * investment) / campaign.target_amount
         }
 
+        /// Creates a new governance proposal for a campaign with a description.
+        ///
+        /// Callable by any account. The proposal starts in `Active` status and
+        /// can be voted on by eligible participants.
+        ///
+        /// # Errors
+        /// - `CampaignNotFound` if the campaign does not exist.
         #[ink(message)]
         pub fn create_proposal(
             &mut self,
@@ -785,6 +860,15 @@ mod propchain_crowdfunding {
             Ok(self.proposal_count)
         }
 
+        /// Casts a vote on an active proposal. Each voter can only vote once per proposal.
+        /// Vote weight is determined by the voter's stake in the associated campaign.
+        ///
+        /// Callable by any account. Not payable.
+        ///
+        /// # Errors
+        /// - `AlreadyVoted` if the caller has already voted on this proposal.
+        /// - `ProposalNotFound` if the proposal does not exist.
+        /// - `ProposalNotActive` if the proposal status is not `Active`.
         #[ink(message)]
         pub fn vote(&mut self, proposal_id: u64, in_favour: bool) -> Result<(), CrowdfundingError> {
             let caller = self.env().caller();
@@ -812,6 +896,13 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Finalizes a proposal by tallying votes and setting its status to `Passed`
+        /// (if more votes in favour) or `Rejected` (otherwise).
+        ///
+        /// Callable by any account. Once finalized, the proposal can no longer be voted on.
+        ///
+        /// # Errors
+        /// - `ProposalNotFound` if the proposal does not exist.
         #[ink(message)]
         pub fn finalize_proposal(
             &mut self,
@@ -830,6 +921,13 @@ mod propchain_crowdfunding {
             Ok(proposal.status)
         }
 
+        /// Lists shares for sale on the secondary market. The caller must hold at least
+        /// as many shares as they wish to list.
+        ///
+        /// Callable by any shareholder. Not payable.
+        ///
+        /// # Errors
+        /// - `InsufficientShares` if the caller does not hold enough shares in the campaign.
         #[ink(message)]
         pub fn list_shares(
             &mut self,
@@ -859,6 +957,11 @@ mod propchain_crowdfunding {
             Ok(self.listing_count)
         }
 
+        /// Purchase shares from a share listing. The buyer pays the listing
+        /// price and receives the shares; the seller's holdings are reduced.
+        ///
+        /// - **Caller**: Any account.
+        /// - **Errors**: `ListingNotFound`.
         #[ink(message)]
         pub fn buy_shares(&mut self, listing_id: u64) -> Result<u128, CrowdfundingError> {
             let listing = self
@@ -887,6 +990,10 @@ mod propchain_crowdfunding {
             Ok(total_cost)
         }
 
+        /// Record a campaign share on a social media platform. Emits a
+        /// `CampaignShared` event; no on-chain state change.
+        ///
+        /// - **Caller**: Any account.
         #[ink(message)]
         pub fn share_campaign(
             &mut self,
@@ -907,6 +1014,11 @@ mod propchain_crowdfunding {
             Ok(())
         }
 
+        /// Compute and store a risk profile for a campaign based on its
+        /// LTV ratio, developer score, and market volatility.
+        ///
+        /// - **Caller**: Admin only.
+        /// - **Errors**: `Unauthorized`.
         #[ink(message)]
         pub fn assess_risk(
             &mut self,
@@ -938,36 +1050,47 @@ mod propchain_crowdfunding {
 
         // ── Basic Getters ────────────────────────────────────
 
+        /// Return a campaign by ID, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_campaign(&self, campaign_id: u64) -> Option<Campaign> {
             self.campaigns.get(campaign_id)
         }
 
+        /// Return the total investment amount for a campaign by a specific
+        /// investor, or `0` if the investor has not invested.
         #[ink(message)]
         pub fn get_investment(&self, campaign_id: u64, investor: AccountId) -> u128 {
             self.investments.get((campaign_id, investor)).unwrap_or(0)
         }
 
+        /// Return a milestone by ID, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_milestone(&self, milestone_id: u64) -> Option<Milestone> {
             self.milestones.get(milestone_id)
         }
 
+        /// Return a governance proposal by ID, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_proposal(&self, proposal_id: u64) -> Option<Proposal> {
             self.proposals.get(proposal_id)
         }
 
+        /// Return a share listing by ID, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_listing(&self, listing_id: u64) -> Option<ShareListing> {
             self.listings.get(listing_id)
         }
 
+        /// Return the risk profile for a campaign by ID, or `None` if unrated.
+        /// Return the risk profile for a campaign, or `None` if not assessed.
         #[ink(message)]
         pub fn get_risk_profile(&self, campaign_id: u64) -> Option<RiskProfile> {
             self.risk_profiles.get(campaign_id)
         }
 
+        /// Return comprehensive success metrics for a campaign by ID, or `None` if it does not exist.
+        /// Return computed success metrics for a campaign including funding
+        /// progress, average investment, milestone counts, and capital released.
         #[ink(message)]
         pub fn get_campaign_success_metrics(
             &self,
@@ -997,6 +1120,7 @@ mod propchain_crowdfunding {
             })
         }
 
+        /// Return the number of shares held by an investor in a campaign.
         #[ink(message)]
         pub fn get_shares(&self, campaign_id: u64, investor: AccountId) -> u64 {
             self.share_holdings
@@ -1004,6 +1128,7 @@ mod propchain_crowdfunding {
                 .unwrap_or(0)
         }
 
+        /// Return the admin account of this contract.
         #[ink(message)]
         pub fn get_admin(&self) -> AccountId {
             self.admin
