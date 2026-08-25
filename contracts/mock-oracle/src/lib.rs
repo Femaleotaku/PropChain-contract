@@ -38,8 +38,10 @@ use ink::storage::Mapping;
 use propchain_traits::oracle::*;
 use propchain_traits::property::PropertyType;
 
+/// Public so consumers (e.g. the propchain-tests crate) can link
+/// `mock_oracle::mock_oracle_contract::MockOracle` directly.
 #[ink::contract]
-mod mock_oracle_contract {
+pub mod mock_oracle_contract {
     use super::*;
 
     /// Default confidence score for mock valuations.

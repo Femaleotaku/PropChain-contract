@@ -700,4 +700,10 @@ mod propchain_fees {
             self.calculate_fee(operation)
         }
     }
+
+    // Unit-test module lives in `tests.rs` (mirrors the bridge contract's
+    // `include!("tests.rs")` pattern). Named `fee_tests` because the
+    // `include!("errors.rs")` above already contributes a sibling `mod tests`.
+    #[cfg(test)]
+    include!("tests.rs");
 }

@@ -5156,6 +5156,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "propchain-common"
+version = "1.0.0"
+dependencies = [
+ "ink 5.1.1",
+ "parity-scale-codec",
+]
+
+[[package]]
 name = "propchain-contracts"
 version = "1.0.0"
 dependencies = [
@@ -5337,6 +5345,7 @@ dependencies = [
  "ink 5.1.1",
  "ink_e2e",
  "ink_env 5.1.1",
+ "mock-oracle",
  "oracle",
  "parity-scale-codec",
  "propchain-bridge",

@@ -18,3 +18,6 @@ pub mod security_audit_runner;
 // ─── Regression Test Suite ───────────────────────────────────────────
 /// Issue #487: Regression test suite for all previously fixed bugs
 pub mod regression;
+
+// ─── Issue #1010: Mock Oracle Integration ────────────────────────────
+pub mod integration_mock_oracle;
