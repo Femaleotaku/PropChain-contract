@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::arithmetic_side_effects,
@@ -1153,8 +1154,9 @@ mod propchain_oracle {
         ///
         /// After aggregating prices, records each responding source's last-report
         /// timestamp and increments the missed-update counter for any active
-        /// source that did **not** respond. Auto-slash checks are then run
-        /// against all active sources (Issue #497).
+        /// source that did **not** respond. Sources that exceed their allowed
+        /// number of missed updates are then auto-slashed by the same pass
+        /// that runs over all active sources.
         #[ink(message)]
         pub fn update_valuation_from_sources(
             &mut self,
@@ -3350,11 +3352,20 @@ mod propchain_oracle {
 
     /// Implementation of the Oracle trait from propchain-traits
     impl propchain_traits::Oracle for PropertyValuationOracle {
+        /// Returns the stored valuation for `property_id`.
+        ///
+        /// Thin wrapper over `get_property_valuation`; open to any caller.
+        /// Fails with `OracleError::PropertyNotFound` when no valuation has
+        /// been recorded for the property.
         #[ink(message)]
         fn get_valuation(&self, property_id: u64) -> Result<PropertyValuation, OracleError> {
             self.get_property_valuation(property_id)
         }
 
+        /// Returns the stored valuation together with its confidence band.
+        ///
+        /// Delegates to the inherent `get_valuation_with_confidence`; open to
+        /// any caller. Fails when the property has no recorded valuation.
         #[ink(message)]
         fn get_valuation_with_confidence(
             &self,
@@ -3363,11 +3374,20 @@ mod propchain_oracle {
             self.get_valuation_with_confidence(property_id)
         }
 
+        /// Records a valuation request for `property_id` and returns its id.
+        ///
+        /// Request ids are assigned sequentially. A repeat request while a
+        /// previous one is still pending (within `max_price_staleness`)
+        /// fails with `OracleError::RequestPending`. Open to any caller.
         #[ink(message)]
         fn request_valuation(&mut self, property_id: u64) -> Result<u64, OracleError> {
             self.request_property_valuation(property_id)
         }
 
+        /// Requests valuations for many properties at once.
+        ///
+        /// Returns only the successful request ids; per-property failures are
+        /// aggregated in the internal result and do not abort the batch.
         #[ink(message)]
         fn batch_request_valuations(
             &mut self,
@@ -3377,6 +3397,10 @@ mod propchain_oracle {
             Ok(result.successes)
         }
 
+        /// Returns up to `limit` historical valuations for `property_id`,
+        /// newest first.
+        ///
+        /// Read-only; properties without history return an empty vector.
         #[ink(message)]
         fn get_historical_valuations(
             &self,
@@ -3386,6 +3410,9 @@ mod propchain_oracle {
             self.get_historical_valuations(property_id, limit)
         }
 
+        /// Returns market volatility metrics for a property type/location.
+        ///
+        /// Read-only view computed from recorded history; open to any caller.
         #[ink(message)]
         fn get_market_volatility(
             &self,
@@ -3395,16 +3422,27 @@ mod propchain_oracle {
             self.get_market_volatility(property_type, location)
         }
 
+        /// Returns up to `limit` recorded data snapshots for `property_id`.
+        ///
+        /// Read-only; empty vector when no snapshots exist for the property.
         #[ink(message)]
         fn get_oracle_snapshots(&self, property_id: u64, limit: u32) -> Vec<OracleDataSnapshot> {
             self.get_oracle_snapshots(property_id, limit)
         }
 
+        /// Returns up to `limit` history entries reported by `source_id`.
+        ///
+        /// Read-only; sources that never reported return an empty vector.
         #[ink(message)]
         fn get_source_history(&self, source_id: String, limit: u32) -> Vec<SourceHistoryEntry> {
             self.get_source_history(source_id, limit)
         }
 
+        /// Returns snapshots for `property_id` whose timestamp falls within
+        /// `[start_timestamp, end_timestamp]`.
+        ///
+        /// Read-only range filter over recorded snapshots; entries outside
+        /// the window (or properties with no history) yield an empty vector.
         #[ink(message)]
         fn get_history_by_date_range(
             &self,
@@ -3415,6 +3453,11 @@ mod propchain_oracle {
             self.get_history_by_date_range(property_id, start_timestamp, end_timestamp)
         }
 
+        /// Returns aggregate statistics (min/max/average, volatility, trend)
+        /// over the last `days_lookback` days for `property_id`.
+        ///
+        /// Fails with `OracleError::PropertyNotFound` if nothing is recorded
+        /// for the property in the lookback window.
         #[ink(message)]
         fn get_history_statistics(
             &self,
@@ -3427,11 +3470,21 @@ mod propchain_oracle {
 
     /// Implementation of the OracleRegistry trait from propchain-traits
     impl propchain_traits::OracleRegistry for PropertyValuationOracle {
+        /// Registers or updates an oracle source.
+        ///
+        /// Admin only (`ensure_admin`). Rejects sources with weight above 100
+        /// (`OracleError::InvalidParameters`) and emits `OracleSourceAdded`
+        /// on success.
         #[ink(message)]
         fn add_source(&mut self, source: OracleSource) -> Result<(), OracleError> {
             self.add_oracle_source(source)
         }
 
+        /// Deregisters the source with the given id.
+        ///
+        /// Admin only (`ensure_admin`). Removing an unknown id succeeds
+        /// silently; the id is dropped from both the registry and the active
+        /// source list.
         #[ink(message)]
         fn remove_source(&mut self, source_id: String) -> Result<(), OracleError> {
             self.ensure_admin()?;
@@ -3440,6 +3493,11 @@ mod propchain_oracle {
             Ok(())
         }
 
+        /// Adjusts a source's reputation after a success/failure report.
+        ///
+        /// Admin only. Reputation starts at 500, +10 on success (capped at
+        /// 1000), -50 on failure; sources falling below 200 are deactivated
+        /// automatically.
         #[ink(message)]
         fn update_reputation(
             &mut self,
@@ -3449,11 +3507,18 @@ mod propchain_oracle {
             self.update_source_reputation(source_id, success)
         }
 
+        /// Returns a source's current reputation score (0–1000 scale),
+        /// or `None` if the source has no recorded reputation.
         #[ink(message)]
         fn get_reputation(&self, source_id: String) -> Option<u32> {
             self.source_reputations.get(&source_id)
         }
 
+        /// Slashes a source's stake by `penalty_amount` and applies a
+        /// reputation penalty.
+        ///
+        /// Admin only. The stake cannot go below zero; reputation follows the
+        /// failure path of `update_reputation` (-50, deactivation below 200).
         #[ink(message)]
         fn slash_source(
             &mut self,
@@ -3463,6 +3528,11 @@ mod propchain_oracle {
             self.slash_source(source_id, penalty_amount)
         }
 
+        /// Reports whether `new_valuation` deviates from the stored valuation
+        /// by more than 20% while volatility is below 10%.
+        ///
+        /// Pure read-only heuristic; always false when no prior valuation or
+        /// when recent volatility is high.
         #[ink(message)]
         fn detect_anomalies(&self, property_id: u64, new_valuation: u128) -> bool {
             self.is_anomaly(property_id, new_valuation)
@@ -3474,6 +3544,10 @@ mod propchain_oracle {
             Self::new(AccountId::from([0x0u8; 32]))
         }
     }
+
+    // Include unit tests (extracted to tests.rs per Issue #101)
+    #[cfg(test)]
+    include!("tests.rs");
 }
 
 // Re-export the contract and error type

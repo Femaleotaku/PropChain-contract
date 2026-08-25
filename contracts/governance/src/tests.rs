@@ -282,5 +282,362 @@ mod tests {
         // Proposal participation rate query
         assert_eq!(gov.get_proposal_participation(0).unwrap(), 6666);
     }
+
+    // =========================================================================
+    // Voting Privacy: commit / reveal / signed voting (Issue #998)
+    // =========================================================================
+
+    /// Commitment must reproduce the exact encoding used by `reveal_vote`:
+    /// hash_encoded((proposal_id, caller, support, salt)).
+    fn commitment_for(proposal_id: u64, caller: AccountId, support: bool, salt: [u8; 32]) -> Hash {
+        propchain_traits::crypto::hash_encoded(&(proposal_id, caller, support, salt))
+    }
+
+    #[ink::test]
+    fn commit_and_reveal_records_private_vote() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        set_caller(accounts.alice);
+        gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None)
+            .unwrap();
+
+        let salt = [0x2A; 32];
+        set_caller(accounts.bob);
+        gov.commit_vote(0, commitment_for(0, accounts.bob, true, salt))
+            .unwrap();
+
+        // Reveal before the reveal phase started is rejected.
+        assert_eq!(
+            gov.reveal_vote(0, true, salt),
+            Err(Error::ProposalClosed)
+        );
+
+        // Any signer may start the reveal phase; starting it twice is rejected.
+        set_caller(accounts.alice);
+        gov.start_reveal_phase(0).unwrap();
+        assert!(gov.is_reveal_phase_started(0));
+        assert_eq!(
+            gov.start_reveal_phase(0),
+            Err(Error::AlreadyVoted)
+        );
+
+        // A wrong salt does not match the commitment.
+        set_caller(accounts.bob);
+        let wrong_salt = [0x00; 32];
+        assert_eq!(
+            gov.reveal_vote(0, true, wrong_salt),
+            Err(Error::Unauthorized)
+        );
+
+        // Revealing with a support flag different from the committed one also
+        // mismatches (the vote is part of the hashed message).
+        assert_eq!(
+            gov.reveal_vote(0, false, salt),
+            Err(Error::Unauthorized)
+        );
+
+        // The correct reveal records the vote.
+        gov.reveal_vote(0, true, salt).unwrap();
+        let proposal = gov.get_proposal(0).unwrap();
+        assert_eq!(proposal.votes_for, 1);
+        assert_eq!(proposal.status, ProposalStatus::Active);
+
+        // The commitment was cleared to prevent double reveals.
+        assert_eq!(
+            gov.reveal_vote(0, true, salt),
+            Err(Error::AlreadyVoted)
+        );
+    }
+
+    #[ink::test]
+    fn commit_vote_rejects_non_signers_and_bad_state() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        let salt = [0x11; 32];
+
+        // Only signers may commit.
+        set_caller(accounts.django);
+        assert_eq!(
+            gov.commit_vote(0, commitment_for(0, accounts.django, true, salt)),
+            Err(Error::NotASigner)
+        );
+
+        // Unknown proposal id.
+        set_caller(accounts.bob);
+        assert_eq!(
+            gov.commit_vote(42, commitment_for(42, accounts.bob, true, salt)),
+            Err(Error::ProposalNotFound)
+        );
+
+        set_caller(accounts.alice);
+        gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None)
+            .unwrap();
+
+        set_caller(accounts.bob);
+        gov.commit_vote(0, commitment_for(0, accounts.bob, false, salt))
+            .unwrap();
+
+        // A second commitment from the same voter is rejected.
+        assert_eq!(
+            gov.commit_vote(0, commitment_for(0, accounts.bob, false, salt)),
+            Err(Error::AlreadyVoted)
+        );
+
+        // Non-signers cannot start the reveal phase either.
+        set_caller(accounts.django);
+        assert_eq!(
+            gov.start_reveal_phase(0),
+            Err(Error::NotASigner)
+        );
+
+        // Reveal from a voter without any commitment fails once the phase is
+        // open (the missing commitment maps to AlreadyVoted).
+        set_caller(accounts.alice);
+        gov.start_reveal_phase(0).unwrap();
+        set_caller(accounts.charlie);
+        assert_eq!(
+            gov.reveal_vote(0, true, salt),
+            Err(Error::AlreadyVoted)
+        );
+    }
+
+    #[ink::test]
+    fn vote_with_signature_without_signature_is_plain_vote() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        set_caller(accounts.alice);
+        gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None)
+            .unwrap();
+
+        set_caller(accounts.bob);
+        gov.vote_with_signature(0, true, None).unwrap();
+        let proposal = gov.get_proposal(0).unwrap();
+        assert_eq!(proposal.votes_for, 1);
+    }
+
+    #[ink::test]
+    fn vote_with_signature_rejects_missing_key_and_invalid_signature() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        set_caller(accounts.alice);
+        gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None)
+            .unwrap();
+
+        // An approval supplied by a caller with no registered public key is
+        // rejected before any signature math runs. The signature bytes are
+        // canonical (r/s < curve order, recovery id 0/1) so the engine would
+        // recover cleanly rather than panic if it got that far.
+        let mut sig = [0x7Fu8; 65];
+        sig[64] = 0x01; // recovery id
+        let approval = propchain_traits::SignedApproval {
+            signature: sig,
+            message_hash: [0x01; 32],
+        };
+        set_caller(accounts.bob);
+        assert_eq!(
+            gov.vote_with_signature(0, true, Some(approval.clone())),
+            Err(Error::Unauthorized)
+        );
+        assert_eq!(gov.get_proposal(0).unwrap().votes_for, 0);
+
+        // With a key registered, an unrecoverable signature still fails and
+        // no vote is recorded.
+        set_caller(accounts.alice);
+        gov.register_public_key([0x02; 33]).unwrap();
+        assert_eq!(
+            gov.vote_with_signature(0, true, Some(approval)),
+            Err(Error::Unauthorized)
+        );
+        assert_eq!(gov.get_proposal(0).unwrap().votes_for, 0);
+    }
+
+    #[ink::test]
+    fn register_public_key_requires_signer() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        set_caller(accounts.alice);
+        assert!(gov.register_public_key([0x03; 33]).is_ok());
+
+        set_caller(accounts.django);
+        assert_eq!(
+            gov.register_public_key([0x04; 33]),
+            Err(Error::NotASigner)
+        );
+    }
+
+    /// Brute-force recount helper mirroring the pre-#972 scan semantics:
+    /// tallies each proposal by its *final* status and computes the
+    /// participation average over Executed/Rejected proposals.
+    fn brute_force_recount(gov: &Governance) -> GovernanceAnalytics {
+        let signer_count = gov.get_signers().len() as u64;
+        let mut executed = 0u64;
+        let mut rejected = 0u64;
+        let mut cancelled = 0u64;
+        let mut active = 0u64;
+        let mut participation_sum = 0u64;
+        let mut closed = 0u64;
+
+        for id in 0..gov.proposal_counter {
+            if let Some(p) = gov.proposals.get(id) {
+                match p.status {
+                    ProposalStatus::Active | ProposalStatus::Approved => active += 1,
+                    ProposalStatus::Executed => {
+                        executed += 1;
+                        closed += 1;
+                        if signer_count > 0 {
+                            participation_sum +=
+                                (p.votes_for.saturating_add(p.votes_against) as u64)
+                                    .saturating_mul(10_000)
+                                    / signer_count;
+                        }
+                    }
+                    ProposalStatus::Rejected => {
+                        rejected += 1;
+                        closed += 1;
+                        if signer_count > 0 {
+                            participation_sum +=
+                                (p.votes_for.saturating_add(p.votes_against) as u64)
+                                    .saturating_mul(10_000)
+                                    / signer_count;
+                        }
+                    }
+                    ProposalStatus::Cancelled => cancelled += 1,
+                    ProposalStatus::Expired => {}
+                }
+            }
+        }
+
+        GovernanceAnalytics {
+            total_proposals: gov.proposal_counter,
+            executed_proposals: executed,
+            rejected_proposals: rejected,
+            cancelled_proposals: cancelled,
+            active_proposals: active,
+            avg_participation_bps: if closed > 0 {
+                (participation_sum / closed) as u32
+            } else {
+                0
+            },
+        }
+    }
+
+    fn assert_analytics_match_recount(gov: &Governance) {
+        let fast = gov.get_analytics();
+        let brute = brute_force_recount(gov);
+        assert_eq!(fast.total_proposals, brute.total_proposals);
+        assert_eq!(fast.executed_proposals, brute.executed_proposals);
+        assert_eq!(fast.rejected_proposals, brute.rejected_proposals);
+        assert_eq!(fast.cancelled_proposals, brute.cancelled_proposals);
+        assert_eq!(fast.active_proposals, brute.active_proposals);
+        assert_eq!(fast.avg_participation_bps, brute.avg_participation_bps);
+    }
+
+    /// Incremental counters must match a brute-force recount across every
+    /// status transition path (vote, execute, cancel, emergency override).
+    #[ink::test]
+    fn analytics_counters_match_brute_force_recount_across_transitions() {
+        let accounts = default_accounts();
+        let mut gov = create_governance();
+
+        // p0: approved by 2/3 votes, then executed after timelock.
+        let p0 = gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None).unwrap();
+        set_caller(accounts.alice);
+        gov.vote(p0, true).unwrap();
+        set_caller(accounts.bob);
+        gov.vote(p0, true).unwrap(); // reaches Approved
+        assert_analytics_match_recount(&mut gov);
+        advance_block(11);
+        set_caller(accounts.alice); // signer executes after timelock
+        gov.execute_proposal(p0).unwrap();
+
+        // p1: voted down (certain rejection).
+        let p1 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        set_caller(accounts.alice);
+        gov.vote(p1, false).unwrap();
+        set_caller(accounts.bob);
+        gov.vote(p1, false).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // p2: cancelled by proposer while still active.
+        let p2 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        gov.cancel_proposal(p2).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // p3: emergency-rejected straight from Active.
+        let p3 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        set_caller(accounts.alice); // admin-only
+        gov.emergency_override(p3, false).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // p4: emergency-executed from Active.
+        let p4 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        gov.emergency_override(p4, true).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // p5: approved but never executed (stays in Approved/timelock state).
+        let p5 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        set_caller(accounts.alice);
+        gov.vote(p5, true).unwrap();
+        set_caller(accounts.bob);
+        gov.vote(p5, true).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // Tricky case: emergency-execute an already-rejected proposal.
+        // The recount reads final statuses, so p1 moves rejected -> executed.
+        set_caller(accounts.alice); // admin-only
+        gov.emergency_override(p1, true).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // Final sanity snapshot.
+        let stats = gov.get_analytics();
+        assert_eq!(stats.total_proposals, 6);
+        assert_eq!(stats.executed_proposals, 3); // p0, p1 (override), p4
+        assert_eq!(stats.rejected_proposals, 1); // p3
+        assert_eq!(stats.cancelled_proposals, 1); // p2
+        assert_eq!(stats.active_proposals, 1); // p5 still in Approved
+
+        // p1 contributed its participation exactly once (when it was
+        // rejected), so re-closing it via override must not skew the average.
+        // Closures: p0 (6666 bps), p1 (6666 bps), p3 (0), p4 (0) -> avg 3333.
+        let expected_avg = ((2 * 10_000 / 3) + (2 * 10_000 / 3) + 0 + 0) / 4;
+        assert_eq!(stats.avg_participation_bps, expected_avg);
+    }
+
+    /// A proposal-heavy history (>1000 proposals) must not degrade or corrupt
+    /// analytics: counters are maintained incrementally per transition.
+    #[ink::test]
+    fn analytics_stays_consistent_over_thousand_proposal_history() {
+        let accounts = default_accounts();
+        let mut gov = create_governance();
+
+        // GOVERNANCE_MAX_ACTIVE_PROPOSALS caps concurrent active proposals,
+        // so create batches of 100 and cancel them to free room again.
+        let batch = 100usize;
+        let rounds = 11;
+        for round in 0..rounds {
+            for _ in 0..batch {
+                let id = gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None).unwrap();
+                assert_eq!(id as usize, round * batch + (id as usize % batch));
+            }
+            for id in (round * batch) as u64..((round + 1) * batch) as u64 {
+                gov.cancel_proposal(id).unwrap();
+            }
+        }
+
+        let stats = gov.get_analytics();
+        assert_eq!(stats.total_proposals, (batch * rounds) as u64);
+        assert_eq!(stats.cancelled_proposals, (batch * rounds) as u64);
+        assert_eq!(stats.active_proposals, 0);
+        assert_eq!(stats.executed_proposals, 0);
+        assert_eq!(stats.rejected_proposals, 0);
+        assert_eq!(stats.avg_participation_bps, 0);
+
+        assert_analytics_match_recount(&mut gov);
+    }
 }
 

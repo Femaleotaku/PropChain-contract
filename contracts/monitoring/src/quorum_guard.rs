@@ -1,14 +1,16 @@
+use ink::prelude::vec::Vec;
+
 #[derive(Clone, Debug)]
 pub struct ProposalParticipation { pub proposal_id: u64, pub participation_bps: u32 }
 
 pub struct QuorumGuard {
-    history: alloc::vec::Vec<ProposalParticipation>,
+    history: Vec<ProposalParticipation>,
     warning_threshold_bps: u32,
 }
 
 impl QuorumGuard {
     pub fn new(warning_threshold_bps: u32) -> Self {
-        Self { history: alloc::vec::Vec::new(), warning_threshold_bps }
+        Self { history: Vec::new(), warning_threshold_bps }
     }
 
     pub fn record(&mut self, proposal_id: u64, participation_bps: u32) -> bool {

@@ -21,7 +21,9 @@ propchain-traits = { path = "../traits", default-features = false }
 [lib]
 name = "mock_oracle"
 path = "src/lib.rs"
-crate-type = ["cdylib"]
+# "rlib" lets the propchain-tests crate link MockOracle directly
+# (same pattern as contracts/fractional).
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["std", "mock"]
