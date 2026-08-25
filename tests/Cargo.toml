@@ -32,7 +32,9 @@ staking = { path = "../contracts/staking", default-features = false }
 propchain-bridge = { path = "../contracts/bridge", default-features = false }
 oracle = { path = "../contracts/oracle", default-features = false }
 propchain-insurance = { path = "../contracts/insurance", default-features = false }
+# Issue #1013: third-party registry integration coverage
 propchain-third-party = { path = "../contracts/third-party", default-features = false }
+
 # Issue #1010: mock oracle integration coverage (no "mock" feature — prices
 # must come from explicit pushes only)
 mock-oracle = { path = "../contracts/mock-oracle", default-features = false }
