@@ -80,6 +80,10 @@ pub enum FeeError {
     BidDeadlineNotReached,
     /// The caller tried to bid on their own auction.
     SelfBidNotAllowed,
+    /// The value attached to the call is lower than the required bid amount.
+    InsufficientValue,
+    /// An outgoing transfer (outbid refund or seller payout) failed.
+    TransferFailed,
 }
 
 impl FeeError {
@@ -89,14 +93,17 @@ impl FeeError {
     pub fn severity(&self) -> ErrorSeverity {
         match self {
             FeeError::Unauthorized | FeeError::SelfBidNotAllowed => ErrorSeverity::Auth,
-            FeeError::ArithmeticError | FeeError::InvalidConfig => ErrorSeverity::Internal,
+            FeeError::ArithmeticError | FeeError::InvalidConfig | FeeError::TransferFailed => {
+                ErrorSeverity::Internal
+            }
             FeeError::AuctionNotFound
             | FeeError::AuctionEnded
             | FeeError::AuctionNotEnded
             | FeeError::BidTooLow
             | FeeError::AlreadySettled
             | FeeError::InvalidProperty
-            | FeeError::BidDeadlineNotReached => ErrorSeverity::User,
+            | FeeError::BidDeadlineNotReached
+            | FeeError::InsufficientValue => ErrorSeverity::User,
         }
     }
 
@@ -110,8 +117,9 @@ impl FeeError {
             | FeeError::AuctionEnded
             | FeeError::AuctionNotEnded
             | FeeError::AlreadySettled
-            | FeeError::BidDeadlineNotReached => FeeErrorKind::AuctionLifecycle,
-            FeeError::BidTooLow => FeeErrorKind::BidValidation,
+            | FeeError::BidDeadlineNotReached
+            | FeeError::TransferFailed => FeeErrorKind::AuctionLifecycle,
+            FeeError::BidTooLow | FeeError::InsufficientValue => FeeErrorKind::BidValidation,
             FeeError::InvalidConfig | FeeError::ArithmeticError => {
                 FeeErrorKind::ConfigValidation
             }
@@ -123,7 +131,9 @@ impl FeeError {
     pub fn is_recoverable(&self) -> bool {
         match self {
             // Hard stops — no retry will help without operator intervention.
-            FeeError::ArithmeticError | FeeError::InvalidConfig => false,
+            FeeError::ArithmeticError | FeeError::InvalidConfig | FeeError::TransferFailed => {
+                false
+            }
             // Everything else is correctable by the caller.
             _ => true,
         }
@@ -165,6 +175,12 @@ impl FeeError {
             FeeError::SelfBidNotAllowed => {
                 "You cannot bid on an auction you created."
             }
+            FeeError::InsufficientValue => {
+                "Attach at least the bid amount as transferred value with your bid."
+            }
+            FeeError::TransferFailed => {
+                "An outgoing refund or payout failed. Contact the development team."
+            }
         }
     }
 }
@@ -204,6 +220,8 @@ impl ContractError for FeeError {
             FeeError::ArithmeticError => fee_codes::FEE_ARITHMETIC_ERROR,
             FeeError::BidDeadlineNotReached => fee_codes::FEE_BID_DEADLINE_NOT_REACHED,
             FeeError::SelfBidNotAllowed => fee_codes::FEE_SELF_BID_NOT_ALLOWED,
+            FeeError::InsufficientValue => fee_codes::FEE_INSUFFICIENT_VALUE,
+            FeeError::TransferFailed => fee_codes::FEE_TRANSFER_FAILED,
         }
     }
 
@@ -228,6 +246,10 @@ impl ContractError for FeeError {
             FeeError::SelfBidNotAllowed => {
                 "The auction creator is not permitted to bid on their own auction"
             }
+            FeeError::InsufficientValue => {
+                "The value attached to the bid call is lower than the bid amount"
+            }
+            FeeError::TransferFailed => "An outgoing transfer of escrowed funds failed",
         }
     }
 
@@ -238,8 +260,10 @@ impl ContractError for FeeError {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+// Named `error_tests` (not `tests`) because `tests.rs` is also include!()d
+// into this same module scope and already claims the `tests` name.
 #[cfg(test)]
-mod tests {
+mod error_tests {
     use super::*;
 
     // Every variant under test — update this when adding new variants so the
@@ -256,6 +280,8 @@ mod tests {
         FeeError::ArithmeticError,
         FeeError::BidDeadlineNotReached,
         FeeError::SelfBidNotAllowed,
+        FeeError::InsufficientValue,
+        FeeError::TransferFailed,
     ];
 
     // ── Display / description ─────────────────────────────────────────────────
@@ -314,6 +340,7 @@ mod tests {
             FeeError::AlreadySettled,
             FeeError::InvalidProperty,
             FeeError::BidDeadlineNotReached,
+            FeeError::InsufficientValue,
         ];
         for e in user_errors {
             assert_eq!(e.severity(), ErrorSeverity::User, "{e:?}");
@@ -326,6 +353,7 @@ mod tests {
     fn arithmetic_and_config_errors_are_not_recoverable() {
         assert!(!FeeError::ArithmeticError.is_recoverable());
         assert!(!FeeError::InvalidConfig.is_recoverable());
+        assert!(!FeeError::TransferFailed.is_recoverable());
     }
 
     #[test]
@@ -357,6 +385,10 @@ mod tests {
     #[test]
     fn bid_too_low_maps_to_bid_validation_kind() {
         assert_eq!(FeeError::BidTooLow.kind(), FeeErrorKind::BidValidation);
+        assert_eq!(
+            FeeError::InsufficientValue.kind(),
+            FeeErrorKind::BidValidation
+        );
     }
 
     #[test]
@@ -372,6 +404,7 @@ mod tests {
             FeeError::AuctionNotEnded,
             FeeError::AlreadySettled,
             FeeError::BidDeadlineNotReached,
+            FeeError::TransferFailed,
         ];
         for e in lifecycle {
             assert_eq!(e.kind(), FeeErrorKind::AuctionLifecycle, "{e:?}");

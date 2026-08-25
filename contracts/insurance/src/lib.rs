@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::arithmetic_side_effects,
@@ -24,7 +25,7 @@ mod fraud_detection;
 
 /// Decentralized Property Insurance Platform
 #[ink::contract]
-mod propchain_insurance {
+pub mod propchain_insurance {
     use ink::prelude::string::String;
     use ink::prelude::vec::Vec;
     use propchain_traits::{non_reentrant, ReentrancyError, ReentrancyGuard};

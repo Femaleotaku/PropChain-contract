@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(target_family = "wasm", no_std)]
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Env, Symbol};
 
