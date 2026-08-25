@@ -1618,4 +1618,165 @@ mod tests {
             "new trades on day 20001 should accumulate fresh account volume"
         );
     }
+
+    // =========================================================================
+    // Overflow-safe time arithmetic (Issue #993)
+    // =========================================================================
+
+    fn sample_metadata(location: &str) -> PropertyMetadata {
+        PropertyMetadata {
+            location: String::from(location),
+            size: 100,
+            legal_description: String::from("Time safety"),
+            valuation: 10_000,
+            documents_url: String::from("ipfs://time"),
+        }
+    }
+
+    #[ink::test]
+    fn test_multisig_timeout_at_u64_max_does_not_wrap() {
+        let mut bridge = setup_bridge();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge.add_validator(accounts.alice).expect("add validator");
+        bridge.add_validator(accounts.bob).expect("add validator");
+
+        // A caller-supplied timeout of u64::MAX must not wrap expires_at
+        // into the past (which would expire the request on arrival).
+        let request_id = bridge
+            .initiate_bridge_multisig(
+                1,
+                2,
+                accounts.bob,
+                2,
+                Some(u64::MAX),
+                sample_metadata("Max Timeout"),
+            )
+            .expect("initiate with max timeout should not overflow");
+
+        // The request must still be signable: an expired request would
+        // return RequestExpired here.
+        let signed = bridge.sign_bridge_request(request_id, true);
+        assert!(
+            signed.is_ok(),
+            "request with saturated expiry must not be treated as expired"
+        );
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        bridge
+            .sign_bridge_request(request_id, true)
+            .expect("second signature");
+
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge
+            .execute_bridge(request_id)
+            .expect("request with max timeout executes normally");
+    }
+
+    #[ink::test]
+    fn test_emergency_request_timeout_at_u64_max_saturates() {
+        let mut bridge = setup_bridge();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge
+            .add_emergency_signer(accounts.bob)
+            .expect("add emergency signer");
+        bridge
+            .add_emergency_signer(accounts.charlie)
+            .expect("add emergency signer");
+        bridge.set_emergency_threshold(2).expect("threshold");
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let pause_flags = propchain_traits::PauseFlags {
+            all_operations: false,
+            new_requests: true,
+            signing: false,
+            execution: false,
+            cross_chain_trades: false,
+        };
+        let request_id = bridge
+            .propose_pause_bridge(
+                pause_flags,
+                propchain_traits::PauseReason::ManualAdmin,
+                Some(String::from("max timeout")),
+                Some(u64::MAX),
+            )
+            .expect("propose with max timeout should not overflow");
+
+        // expires_at must clamp to u64::MAX instead of wrapping below the
+        // creation block.
+        let request = bridge
+            .get_emergency_request(request_id)
+            .expect("emergency request stored");
+        assert_eq!(request.expires_at, Some(u64::MAX));
+    }
+
+    #[ink::test]
+    fn test_rate_window_survives_u64_max_duration() {
+        let mut bridge = setup_bridge();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge.add_validator(accounts.alice).expect("add validator");
+        bridge.add_validator(accounts.bob).expect("add validator");
+
+        // A u64::MAX window duration makes `window_start + duration`
+        // overflow; saturating arithmetic must keep the window open.
+        bridge
+            .configure_batch_verification(10, u64::MAX)
+            .expect("configure batch verification");
+
+        test::set_block_timestamp::<DefaultEnvironment>(1_000);
+
+        let first = bridge
+            .initiate_bridge_multisig(
+                1,
+                2,
+                accounts.bob,
+                2,
+                Some(50),
+                sample_metadata("Window One"),
+            )
+            .expect("first initiate");
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge.sign_bridge_request(first, true).expect("sign");
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        bridge.sign_bridge_request(first, true).expect("sign");
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge.execute_bridge(first).expect("execute");
+
+        // Move far past any wrapped bound: pre-fix this would have been
+        // >= window_start + duration (wrapped) and opened a fresh window.
+        test::set_block_timestamp::<DefaultEnvironment>(5_000);
+
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        let second = bridge
+            .initiate_bridge_multisig(
+                2,
+                3,
+                accounts.charlie,
+                2,
+                Some(50),
+                sample_metadata("Window Two"),
+            )
+            .expect("second initiate");
+        bridge.sign_bridge_request(second, true).expect("sign");
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        bridge.sign_bridge_request(second, true).expect("sign");
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge.execute_bridge(second).expect("execute second");
+
+        let history = bridge.get_bridge_history(accounts.alice);
+        assert!(history.len() >= 2, "both executions recorded");
+        let (_, window_one) = bridge
+            .get_transaction_batch(history[0].transaction_hash)
+            .expect("first tx batched");
+        let (_, window_two) = bridge
+            .get_transaction_batch(history[1].transaction_hash)
+            .expect("second tx batched");
+
+        assert_eq!(
+            window_one, window_two,
+            "with a u64::MAX duration both transactions share one batch window"
+        );
+    }
 }

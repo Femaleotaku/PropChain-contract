@@ -38,6 +38,7 @@ mod propchain_crowdfunding {
         NoInvestmentFound,
         AccreditationNotVerified,
         InvalidParameters,
+        ArithmeticOverflow,
     }
 
     impl From<propchain_traits::ReentrancyError> for CrowdfundingError {
@@ -537,20 +538,34 @@ mod propchain_crowdfunding {
                 return Err(CrowdfundingError::CampaignNotActive);
             }
             let current = self.investments.get((campaign_id, caller)).unwrap_or(0);
+            // Compute every fallible total before touching storage so an
+            // overflowing investment reverts without partial ledger updates.
+            let new_total = current
+                .checked_add(amount)
+                .ok_or(CrowdfundingError::ArithmeticOverflow)?;
+            let new_raised = campaign
+                .raised_amount
+                .checked_add(amount)
+                .ok_or(CrowdfundingError::ArithmeticOverflow)?;
+            let shares = u64::try_from(amount / 1000)
+                .map_err(|_| CrowdfundingError::ArithmeticOverflow)?;
+            let current_shares = self.share_holdings.get((campaign_id, caller)).unwrap_or(0);
+            let new_shares = current_shares
+                .checked_add(shares)
+                .ok_or(CrowdfundingError::ArithmeticOverflow)?;
+
             if current == 0 {
                 campaign.investor_count += 1;
             }
             self.investments
-                .insert((campaign_id, caller), &(current + amount));
-            campaign.raised_amount += amount;
+                .insert((campaign_id, caller), &new_total);
+            campaign.raised_amount = new_raised;
             if campaign.raised_amount >= campaign.target_amount {
                 campaign.status = CampaignStatus::Funded;
             }
             self.campaigns.insert(campaign_id, &campaign);
-            let shares = (amount / 1000) as u64;
-            let current_shares = self.share_holdings.get((campaign_id, caller)).unwrap_or(0);
             self.share_holdings
-                .insert((campaign_id, caller), &(current_shares + shares));
+                .insert((campaign_id, caller), &new_shares);
             self.env().emit_event(InvestmentMade {
                 campaign_id,
                 investor: caller,
@@ -584,7 +599,11 @@ mod propchain_crowdfunding {
                 oracle_data_hash: None,
             };
             self.milestones.insert(self.milestone_count, &milestone);
-            let total_milestones = self.campaign_milestone_counts.get(campaign_id).unwrap_or(0) + 1;
+            let total_milestones = self
+                .campaign_milestone_counts
+                .get(campaign_id)
+                .unwrap_or(0)
+                .saturating_add(1);
             self.campaign_milestone_counts
                 .insert(campaign_id, &total_milestones);
             Ok(self.milestone_count)
@@ -879,9 +898,12 @@ mod propchain_crowdfunding {
                 .share_holdings
                 .get((listing.campaign_id, buyer))
                 .unwrap_or(0);
+            let new_buyer_shares = buyer_shares
+                .checked_add(listing.shares)
+                .ok_or(CrowdfundingError::ArithmeticOverflow)?;
             self.share_holdings.insert(
                 (listing.campaign_id, buyer),
-                &(buyer_shares + listing.shares),
+                &new_buyer_shares,
             );
             self.listings.remove(listing_id);
             Ok(total_cost)
@@ -1819,5 +1841,80 @@ mod tests {
         assert_eq!(demographics.total_investors, 2);
         assert_eq!(demographics.average_investment, 75_000);
         assert!(!demographics.jurisdictions.is_empty());
+    }
+
+    // ── Overflow-safe funding ledger (Issue #994) ────────────
+
+    fn onboard_accredited_investor(contract: &mut RealEstateCrowdfunding, who: ink::primitives::AccountId) {
+        test::set_caller::<DefaultEnvironment>(who);
+        contract.onboard_investor("US".into(), false).unwrap();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        contract.verify_accreditation(who).unwrap();
+        test::set_caller::<DefaultEnvironment>(who);
+    }
+
+    #[ink::test]
+    fn test_invest_amount_beyond_share_capacity_rejected_atomically() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract
+            .create_campaign("Overflow Guard".into(), u128::MAX)
+            .unwrap();
+        contract.activate_campaign(campaign_id).unwrap();
+        onboard_accredited_investor(&mut contract, accounts.bob);
+
+        // An amount whose share credit (amount / 1000) exceeds u64 must be
+        // rejected outright instead of truncating the share conversion.
+        let too_big = u128::MAX;
+        assert_eq!(
+            contract.invest(campaign_id, too_big),
+            Err(CrowdfundingError::ArithmeticOverflow)
+        );
+
+        // Nothing was written: the investment ledger, the campaign total and
+        // its status are untouched (atomic revert).
+        assert_eq!(contract.get_investment(campaign_id, accounts.bob), 0);
+        let campaign = contract.get_campaign(campaign_id).unwrap();
+        assert_eq!(campaign.raised_amount, 0);
+        assert_eq!(campaign.status, CampaignStatus::Active);
+
+        // A legal amount still works afterwards.
+        contract.invest(campaign_id, 10_000).unwrap();
+        assert_eq!(contract.get_investment(campaign_id, accounts.bob), 10_000);
+    }
+
+    #[ink::test]
+    fn test_share_ledger_accumulation_overflow_rejected() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract
+            .create_campaign("Share Saturation".into(), u128::MAX)
+            .unwrap();
+        contract.activate_campaign(campaign_id).unwrap();
+        onboard_accredited_investor(&mut contract, accounts.bob);
+
+        // First investment maxes out the investor's u64 share balance:
+        // shares = (u64::MAX * 1000) / 1000 = u64::MAX.
+        let saturating_amount = u64::MAX as u128 * 1000;
+        contract
+            .invest(campaign_id, saturating_amount)
+            .expect("first investment within capacity");
+
+        // A second investment would push the accumulated share balance past
+        // u64 and must be rejected instead of wrapping.
+        assert_eq!(
+            contract.invest(campaign_id, 2_000),
+            Err(CrowdfundingError::ArithmeticOverflow)
+        );
+
+        // The rejected attempt wrote nothing: balances and totals match the
+        // state after the first investment only.
+        assert_eq!(
+            contract.get_investment(campaign_id, accounts.bob),
+            saturating_amount
+        );
+        let campaign = contract.get_campaign(campaign_id).unwrap();
+        assert_eq!(campaign.raised_amount, saturating_amount);
     }
 }

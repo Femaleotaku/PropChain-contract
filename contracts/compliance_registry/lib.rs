@@ -2762,5 +2762,162 @@ mod compliance_registry {
             let result = contract.set_screening_cache_ttl(1800);
             assert_eq!(result, Err(Error::NotAuthorized));
         }
+
+        // =====================================================================
+        // Tax module + revocation gating (Issue #996)
+        // =====================================================================
+
+        /// Fully verify a user through KYC, AML, sanctions and consent so that
+        /// only tax/revocation state decides the compliance gate.
+        fn fully_verify(contract: &mut ComplianceRegistry, user: AccountId) {
+            contract
+                .submit_verification(
+                    user,
+                    Jurisdiction::US,
+                    [0u8; 32],
+                    RiskLevel::Low,
+                    DocumentType::Passport,
+                    BiometricMethod::FaceRecognition,
+                    15,
+                )
+                .expect("verification submission");
+            let aml_factors = AMLRiskFactors {
+                pep_status: false,
+                high_risk_country: false,
+                suspicious_transaction_pattern: false,
+                large_transaction_volume: false,
+                source_of_funds_verified: true,
+            };
+            contract
+                .update_aml_status(user, true, aml_factors)
+                .expect("AML update");
+            contract
+                .update_sanctions_status(user, true, SanctionsList::OFAC)
+                .expect("sanctions update");
+            contract
+                .update_consent(user, ConsentStatus::Given)
+                .expect("consent update");
+        }
+
+        #[ink::test]
+        fn tax_module_status_flows_into_require_compliance() {
+            let mut contract = ComplianceRegistry::new();
+            let user = AccountId::from([0x21; 32]);
+            fully_verify(&mut contract, user);
+            assert!(contract.require_compliance(user).is_ok());
+
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+
+            // Only the owner, verifiers or registered tax modules may sync
+            // tax status.
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.django);
+            assert_eq!(
+                contract.update_tax_compliance_status(user, TaxComplianceStatus {
+                    jurisdiction_code: 840,
+                    reporting_period: 2026,
+                    last_checked_at: 0,
+                    last_payment_at: 0,
+                    outstanding_tax: 500,
+                    reporting_submitted: false,
+                    legal_documents_verified: false,
+                    clearance_expiry: 0,
+                    violation_count: 0,
+                }),
+                Err(Error::NotAuthorized)
+            );
+
+            // Owner registers a dedicated tax module.
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(
+                AccountId::from([0x01; 32]),
+            );
+            contract
+                .set_tax_module(accounts.charlie, true)
+                .expect("owner registers tax module");
+
+            // The module reports outstanding tax: the gate must close...
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
+            contract
+                .update_tax_compliance_status(user, TaxComplianceStatus {
+                    jurisdiction_code: 840,
+                    reporting_period: 2026,
+                    last_checked_at: 1_000,
+                    last_payment_at: 900,
+                    outstanding_tax: 500,
+                    reporting_submitted: false,
+                    legal_documents_verified: false,
+                    clearance_expiry: 0,
+                    violation_count: 1,
+                })
+                .expect("tax module sync");
+            let synced = contract.get_tax_compliance_status(user).unwrap();
+            assert_eq!(synced.outstanding_tax, 500);
+            assert_eq!(synced.jurisdiction_code, 840);
+            assert!(!contract.is_compliant(user));
+            assert_eq!(contract.require_compliance(user), Err(Error::NotVerified));
+
+            // ...and clears once the account is fully tax compliant.
+            contract
+                .update_tax_compliance_status(user, TaxComplianceStatus {
+                    jurisdiction_code: 840,
+                    reporting_period: 2026,
+                    last_checked_at: 2_000,
+                    last_payment_at: 2_000,
+                    outstanding_tax: 0,
+                    reporting_submitted: true,
+                    legal_documents_verified: true,
+                    clearance_expiry: 5_000,
+                    violation_count: 1,
+                })
+                .expect("tax module clear");
+            assert!(contract.is_compliant(user));
+            assert!(contract.require_compliance(user).is_ok());
+
+            // A clearance certificate also expires: past its expiry the gate
+            // closes again even with zero outstanding tax.
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(6_000);
+            assert!(!contract.is_compliant(user));
+            assert_eq!(contract.require_compliance(user), Err(Error::NotVerified));
+
+            // clearance_expiry == 0 means "never expires".
+            contract
+                .update_tax_compliance_status(user, TaxComplianceStatus {
+                    jurisdiction_code: 840,
+                    reporting_period: 2026,
+                    last_checked_at: 6_000,
+                    last_payment_at: 6_000,
+                    outstanding_tax: 0,
+                    reporting_submitted: true,
+                    legal_documents_verified: true,
+                    clearance_expiry: 0,
+                    violation_count: 1,
+                })
+                .expect("permanent clearance sync");
+            assert!(contract.require_compliance(user).is_ok());
+        }
+
+        #[ink::test]
+        fn revoked_verification_fails_require_compliance() {
+            let mut contract = ComplianceRegistry::new();
+            let user = AccountId::from([0x22; 32]);
+            fully_verify(&mut contract, user);
+            assert!(contract.require_compliance(user).is_ok());
+
+            // Revoking flips the stored status to Rejected and closes the
+            // compliance gate for every consumer.
+            contract
+                .revoke_verification(user)
+                .expect("revocation of verified account");
+            let data = contract.get_compliance_data(user).unwrap();
+            assert_eq!(data.status, VerificationStatus::Rejected);
+            assert!(!contract.is_compliant(user));
+            assert_eq!(contract.require_compliance(user), Err(Error::NotVerified));
+
+            // Revoking an unknown account fails cleanly.
+            let stranger = AccountId::from([0x23; 32]);
+            assert_eq!(
+                contract.revoke_verification(stranger),
+                Err(Error::NotVerified)
+            );
+        }
     }
 }

@@ -925,7 +925,7 @@ mod bridge {
             self.request_counter += 1;
             let request_id = self.request_counter;
             let current_block = u64::from(self.env().block_number());
-            let expires_at = timeout_blocks.map(|blocks| current_block + blocks);
+            let expires_at = timeout_blocks.map(|blocks| current_block.saturating_add(blocks));
 
             let request = StoredBridgeRequest::new(
                 request_id,
@@ -1014,7 +1014,7 @@ mod bridge {
             self.request_counter += 1;
             let request_id = self.request_counter;
             let current_block = u64::from(self.env().block_number());
-            let expires_at = timeout_blocks.map(|blocks| current_block + blocks);
+            let expires_at = timeout_blocks.map(|blocks| current_block.saturating_add(blocks));
 
             let request = StoredBridgeRequest::new(
                 request_id,
@@ -2194,7 +2194,7 @@ mod bridge {
             self.emergency_request_counter += 1;
             let request_id = self.emergency_request_counter;
             let current_block = u64::from(self.env().block_number());
-            let expires_at = timeout_blocks.map(|blocks| current_block + blocks);
+            let expires_at = timeout_blocks.map(|blocks| current_block.saturating_add(blocks));
 
             let request = EmergencyRequest {
                 request_id,
@@ -2240,7 +2240,7 @@ mod bridge {
             self.emergency_request_counter += 1;
             let request_id = self.emergency_request_counter;
             let current_block = u64::from(self.env().block_number());
-            let expires_at = timeout_blocks.map(|blocks| current_block + blocks);
+            let expires_at = timeout_blocks.map(|blocks| current_block.saturating_add(blocks));
 
             let request = EmergencyRequest {
                 request_id,
@@ -2540,7 +2540,7 @@ mod bridge {
             let window_duration = self.batch_window_duration;
 
             // Check if we need to create a new window
-            if window_start == 0 || current_time >= window_start + window_duration {
+            if window_start == 0 || current_time >= window_start.saturating_add(window_duration) {
                 let window_counter = self.batch_window_counter.get(source_chain).unwrap_or(0) + 1;
                 self.batch_window_counter
                     .insert(source_chain, &window_counter);

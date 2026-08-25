@@ -5371,6 +5371,7 @@ dependencies = [
  "ink 5.1.1",
  "parity-scale-codec",
  "scale-info",
+ "secp256k1 0.28.2",
 ]
 
 [[package]]
@@ -5381,6 +5382,7 @@ dependencies = [
  "parity-scale-codec",
  "propchain-traits",
  "scale-info",
+ "secp256k1 0.28.2",
 ]
 
 [[package]]

@@ -1563,3 +1563,7 @@ mod property_management {
 }
 
 pub mod submodules;
+
+pub mod permit_module {
+    include!("permit.rs");
+}
