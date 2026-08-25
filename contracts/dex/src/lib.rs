@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 #![allow(
@@ -12,7 +13,7 @@ use ink::storage::Mapping;
 use propchain_traits::*;
 
 #[ink::contract]
-mod dex {
+pub mod dex {
     use propchain_traits::{non_reentrant, ReentrancyError, ReentrancyGuard};
 
     use super::*;

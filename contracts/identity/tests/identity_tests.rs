@@ -3,9 +3,20 @@
 
 use ink::env::test::{default_accounts, DefaultAccounts};
 use ink::primitives::AccountId;
+use propchain_identity::propchain_identity::dashboard::IdentityDashboard;
 use propchain_identity::propchain_identity::{
-    IdentityError, IdentityRegistry, PrivacySettings, VerificationLevel,
+    IdentityError, IdentityRegistry, PrivacySettings, RiskLevel, VerificationLevel,
 };
+
+fn open_privacy_settings() -> PrivacySettings {
+    PrivacySettings {
+        public_reputation: true,
+        public_verification: true,
+        data_sharing_consent: true,
+        zero_knowledge_proof: false,
+        selective_disclosure: vec![],
+    }
+}
 #[ink::test]
 fn test_create_identity() {
     let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
@@ -647,7 +658,7 @@ fn test_identity_audit_trail() {
         selective_disclosure: vec![],
     };
 
-    // Create identity — should add an audit entry
+    // Create identity â€” should add an audit entry
     assert_eq!(
         identity_registry.create_identity(
             did,
@@ -667,7 +678,7 @@ fn test_identity_audit_trail() {
     assert_eq!(entry.account, accounts.alice);
     assert_eq!(entry.action, "identity_created");
 
-    // Verify identity — should add another audit entry
+    // Verify identity â€” should add another audit entry
     identity_registry
         .add_authorized_verifier(accounts.alice)
         .unwrap();
@@ -847,4 +858,427 @@ fn test_port_identity_target_already_exists() {
         identity_registry.port_identity(accounts.bob),
         Err(IdentityError::IdentityAlreadyExists)
     );
+}
+
+#[ink::test]
+fn test_recovery_approvals_complete_and_migrate_identity() {
+    let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
+    let mut identity_registry = IdentityRegistry::new();
+
+    // Bob owns the identity that will be recovered
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+    assert_eq!(
+        identity_registry.create_identity(
+            "did:example:recovery-bob".to_string(),
+            vec![1u8; 32],
+            "Ed25519VerificationKey2018".to_string(),
+            None,
+            open_privacy_settings()
+        ),
+        Ok(())
+    );
+
+    // Admin configures two guardians with threshold 2
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+    assert_eq!(
+        identity_registry.set_recovery_guardians(
+            accounts.bob,
+            vec![accounts.charlie, accounts.django],
+            2
+        ),
+        Ok(())
+    );
+
+    let new_account = AccountId::from([9u8; 32]);
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+    assert_eq!(
+        identity_registry.initiate_recovery(new_account, vec![7u8; 64]),
+        Ok(())
+    );
+
+    // First guardian approval is recorded but does not complete recovery
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
+    assert_eq!(
+        identity_registry.approve_recovery(accounts.bob, new_account),
+        Ok(())
+    );
+    let mid_recovery = identity_registry.get_identity(accounts.bob).unwrap();
+    assert!(mid_recovery.social_recovery.is_recovery_active);
+    assert_eq!(
+        mid_recovery.social_recovery.recovery_approvals,
+        vec![accounts.charlie]
+    );
+
+    // Second guardian approval reaches threshold and migrates the identity
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.django);
+    assert_eq!(
+        identity_registry.approve_recovery(accounts.bob, new_account),
+        Ok(())
+    );
+    assert!(identity_registry.get_identity(accounts.bob).is_none());
+    let migrated = identity_registry.get_identity(new_account).unwrap();
+    assert_eq!(migrated.did_document.did, "did:example:recovery-bob");
+    assert!(!migrated.social_recovery.is_recovery_active);
+    assert!(migrated.social_recovery.recovery_approvals.is_empty());
+}
+
+#[ink::test]
+fn test_recovery_approval_requires_guardian_and_active_flow() {
+    let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
+    let mut identity_registry = IdentityRegistry::new();
+    let new_account = AccountId::from([9u8; 32]);
+
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+    assert_eq!(
+        identity_registry.create_identity(
+            "did:example:guarded-bob".to_string(),
+            vec![1u8; 32],
+            "Ed25519VerificationKey2018".to_string(),
+            None,
+            open_privacy_settings()
+        ),
+        Ok(())
+    );
+
+    // A non-guardian can never approve, even before any recovery exists
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.eve);
+    assert_eq!(
+        identity_registry.approve_recovery(accounts.bob, new_account),
+        Err(IdentityError::Unauthorized)
+    );
+
+    // Admin registers a single threshold-1 guardian
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+    assert_eq!(
+        identity_registry.set_recovery_guardians(accounts.bob, vec![accounts.charlie], 1),
+        Ok(())
+    );
+
+    // Guardian approval without an active recovery is rejected
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
+    assert_eq!(
+        identity_registry.approve_recovery(accounts.bob, new_account),
+        Err(IdentityError::RecoveryNotActive)
+    );
+
+    // Owner initiates a valid recovery (64-byte signature accepted)
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+    assert_eq!(
+        identity_registry.initiate_recovery(new_account, vec![1u8; 64]),
+        Ok(())
+    );
+
+    // Non-guardian approval stays rejected while recovery is active
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.eve);
+    assert_eq!(
+        identity_registry.approve_recovery(accounts.bob, new_account),
+        Err(IdentityError::Unauthorized)
+    );
+    let still_pending = identity_registry.get_identity(accounts.bob).unwrap();
+    assert!(still_pending.social_recovery.is_recovery_active);
+    assert!(still_pending.social_recovery.recovery_approvals.is_empty());
+
+    // The registered guardian completes the recovery
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
+    assert_eq!(
+        identity_registry.approve_recovery(accounts.bob, new_account),
+        Ok(())
+    );
+    assert!(identity_registry.get_identity(accounts.bob).is_none());
+    assert!(identity_registry.get_identity(new_account).is_some());
+}
+
+#[ink::test]
+fn test_dashboard_identity_profile_aggregates_registry_state() {
+    let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
+    let mut identity_registry = IdentityRegistry::new();
+
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+    assert_eq!(
+        identity_registry.create_identity(
+            "did:example:dashboard".to_string(),
+            vec![2u8; 32],
+            "Ed25519VerificationKey2018".to_string(),
+            None,
+            open_privacy_settings()
+        ),
+        Ok(())
+    );
+
+    // Alice is the deployer/admin and therefore an authorized verifier
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+    assert_eq!(
+        identity_registry.verify_identity(accounts.bob, VerificationLevel::Standard, None),
+        Ok(())
+    );
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, true, 1000),
+        Ok(())
+    );
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, true, 1000),
+        Ok(())
+    );
+
+    // Seed one cross-chain verification on Ethereum (chain 1); the owner must
+    // be the caller and reputation becomes (510 + 600) / 2 = 555
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+    assert_eq!(
+        identity_registry.add_cross_chain_verification(1, [0u8; 32].into(), 600),
+        Ok(())
+    );
+
+    // The off-chain engine cannot dispatch cross-contract calls, so the
+    // dashboard aggregation is exercised through its pure builders fed with
+    // state read directly from the seeded registry.
+    let identity = identity_registry.get_identity(accounts.bob).unwrap();
+    let reputation_metrics = identity_registry
+        .get_reputation_metrics(accounts.bob)
+        .unwrap();
+    let ethereum_verification = identity_registry.get_cross_chain_verification(accounts.bob, 1);
+    let cross_chain_summaries =
+        IdentityDashboard::build_cross_chain_summary(vec![(1, ethereum_verification), (2, None)]);
+
+    let profile = IdentityDashboard::build_identity_profile(
+        accounts.bob,
+        identity,
+        reputation_metrics,
+        cross_chain_summaries,
+    );
+    assert_eq!(profile.account_id, accounts.bob);
+    assert_eq!(profile.did, "did:example:dashboard");
+    assert_eq!(profile.verification_level, VerificationLevel::Standard);
+    assert!(profile.is_verified);
+    assert_eq!(profile.trust_score, 75);
+    assert_eq!(profile.reputation_score, 555); // (510 + 600) / 2 after cross-chain verification
+    assert_eq!(profile.reputation_metrics.total_transactions, 2);
+    assert_eq!(profile.reputation_metrics.successful_transactions, 2);
+    assert_eq!(profile.reputation_metrics.failed_transactions, 0);
+    assert_eq!(profile.reputation_metrics.success_rate, 100);
+    assert_eq!(profile.reputation_metrics.average_transaction_value, 1000);
+    assert_eq!(profile.reputation_metrics.total_value_transacted, 2000);
+    assert_eq!(profile.privacy_settings, open_privacy_settings());
+    assert_eq!(profile.cross_chain_verifications.len(), 1);
+    assert_eq!(profile.cross_chain_verifications[0].chain_id, 1);
+    assert_eq!(profile.cross_chain_verifications[0].chain_name, "Ethereum");
+    assert!(profile.cross_chain_verifications[0].is_active);
+}
+
+#[ink::test]
+fn test_dashboard_trust_summary_reflects_assessment() {
+    let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
+    let mut identity_registry = IdentityRegistry::new();
+
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+    assert_eq!(
+        identity_registry.create_identity(
+            "did:example:risky-bob".to_string(),
+            vec![3u8; 32],
+            "Ed25519VerificationKey2018".to_string(),
+            None,
+            open_privacy_settings()
+        ),
+        Ok(())
+    );
+
+    // Fresh identity with default trust score 50 and no history scores 40 => High
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+    assert!(identity_registry.assess_trust(accounts.bob).is_ok());
+
+    // Feed the dashboard builder with state read from the seeded registry
+    let assessment = identity_registry
+        .get_trust_assessment(accounts.alice, accounts.bob)
+        .expect("stored assessment");
+    let target_identity = identity_registry.get_identity(accounts.bob).unwrap();
+
+    let summary = IdentityDashboard::build_trust_summary(
+        accounts.bob,
+        assessment.clone(),
+        target_identity.clone(),
+    );
+    assert_eq!(summary.target_account, accounts.bob);
+    assert_eq!(summary.trust_score, assessment.trust_score);
+    assert_eq!(assessment.trust_score, 40);
+    assert_eq!(summary.risk_level, RiskLevel::High);
+    assert_eq!(summary.verification_level, VerificationLevel::None);
+    assert_eq!(summary.reputation_score, 500);
+    assert!(!summary.is_verified);
+    assert_eq!(summary.last_assessed, assessment.assessment_date);
+    assert_eq!(summary.assessment_expires, assessment.expires_at);
+    assert_eq!(
+        summary.recommended_actions,
+        vec![
+            "Require enhanced verification".to_string(),
+            "Use multi-signature escrow".to_string(),
+            "Consider insurance".to_string(),
+        ]
+    );
+
+    // Critical-risk targets receive avoidance guidance instead
+    let mut risky = assessment;
+    risky.trust_score = 10;
+    risky.risk_level = RiskLevel::Critical;
+    let critical_actions =
+        IdentityDashboard::build_trust_summary(accounts.bob, risky, target_identity.clone())
+            .recommended_actions;
+    assert_eq!(critical_actions.len(), 2);
+    assert_eq!(critical_actions[0], "Avoid transaction");
+}
+
+#[ink::test]
+fn test_dashboard_verification_status_progression() {
+    let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
+    let mut identity_registry = IdentityRegistry::new();
+
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+    assert_eq!(
+        identity_registry.create_identity(
+            "did:example:status-bob".to_string(),
+            vec![4u8; 32],
+            "Ed25519VerificationKey2018".to_string(),
+            None,
+            open_privacy_settings()
+        ),
+        Ok(())
+    );
+
+    let registry_address = ink::env::test::callee::<ink::env::DefaultEnvironment>();
+    let dashboard = IdentityDashboard::new(registry_address);
+
+    let initial = {
+        let identity = identity_registry.get_identity(accounts.bob).unwrap();
+        IdentityDashboard::build_verification_status(accounts.bob, identity)
+    };
+    assert_eq!(initial.current_level, VerificationLevel::None);
+    assert!(!initial.is_verified);
+    assert_eq!(initial.verified_at, None);
+    assert_eq!(initial.expires_at, None);
+    assert_eq!(initial.next_required_level, VerificationLevel::Basic);
+    assert_eq!(initial.verification_steps.len(), 2);
+
+    // Verified at timestamp 0 in off-chain tests with 30 day expiry
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+    assert_eq!(
+        identity_registry.verify_identity(accounts.bob, VerificationLevel::Enhanced, Some(30)),
+        Ok(())
+    );
+
+    let upgraded = {
+        let identity = identity_registry.get_identity(accounts.bob).unwrap();
+        IdentityDashboard::build_verification_status(accounts.bob, identity)
+    };
+    assert_eq!(upgraded.current_level, VerificationLevel::Enhanced);
+    assert!(upgraded.is_verified);
+    assert_eq!(upgraded.verified_at, Some(0));
+    assert_eq!(upgraded.expires_at, Some(30 * 86_400));
+    assert_eq!(upgraded.next_required_level, VerificationLevel::Premium);
+    assert_eq!(upgraded.verification_steps.len(), 2);
+}
+
+#[ink::test]
+fn test_dashboard_privacy_activity_and_statistics_views() {
+    let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
+    let mut identity_registry = IdentityRegistry::new();
+
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+    assert_eq!(
+        identity_registry.create_identity(
+            "did:example:views-bob".to_string(),
+            vec![5u8; 32],
+            "Ed25519VerificationKey2018".to_string(),
+            None,
+            open_privacy_settings()
+        ),
+        Ok(())
+    );
+
+    let registry_address = ink::env::test::callee::<ink::env::DefaultEnvironment>();
+    let dashboard = IdentityDashboard::new(registry_address);
+
+    // Privacy/security view: no guardians configured yet
+    let settings = {
+        let identity = identity_registry.get_identity(accounts.bob).unwrap();
+        IdentityDashboard::build_privacy_security_settings(
+            accounts.bob,
+            identity,
+            identity_registry.get_supported_chains(),
+            0,
+        )
+    };
+    assert!(!settings.social_recovery_enabled);
+    assert_eq!(settings.guardian_count, 0);
+    assert_eq!(settings.recovery_threshold, 3);
+    assert!(!settings.is_recovery_active);
+    assert_eq!(settings.supported_chains, vec![1, 2, 3, 4, 5]);
+    assert_eq!(settings.cross_chain_verifications, 0);
+
+    // Admin configures three guardians with threshold 3
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+    assert_eq!(
+        identity_registry.set_recovery_guardians(
+            accounts.bob,
+            vec![accounts.charlie, accounts.django, accounts.eve],
+            3
+        ),
+        Ok(())
+    );
+
+    let guarded = {
+        let identity = identity_registry.get_identity(accounts.bob).unwrap();
+        IdentityDashboard::build_privacy_security_settings(
+            accounts.bob,
+            identity,
+            identity_registry.get_supported_chains(),
+            0,
+        )
+    };
+    assert!(guarded.social_recovery_enabled);
+    assert_eq!(guarded.guardian_count, 3);
+    assert_eq!(guarded.recovery_threshold, 3);
+    assert!(!guarded.is_recovery_active);
+
+    // Mixed transaction history: 2 successes of 500, 1 failure of 200
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, true, 500),
+        Ok(())
+    );
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, true, 500),
+        Ok(())
+    );
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, false, 200),
+        Ok(())
+    );
+
+    let history = IdentityDashboard::build_activity_history(
+        accounts.bob,
+        identity_registry.get_reputation_metrics(accounts.bob),
+    );
+    assert_eq!(history.account_id, accounts.bob);
+    assert_eq!(history.total_transactions, 3);
+    assert_eq!(history.successful_transactions, 2);
+    assert_eq!(history.failed_transactions, 1);
+    assert_eq!(history.dispute_count, 0);
+    assert_eq!(history.dispute_resolved_count, 0);
+    assert_eq!(history.average_transaction_value, 400);
+    assert_eq!(history.total_value_transacted, 1200);
+    assert!(history.recent_activities.is_empty());
+
+    // Accounts without activity fall back to zeroed defaults
+    let empty_history = IdentityDashboard::build_activity_history(accounts.django, None);
+    assert_eq!(empty_history.total_transactions, 0);
+    assert_eq!(empty_history.average_transaction_value, 0);
+    assert_eq!(empty_history.total_value_transacted, 0);
+
+    // Statistics view returns its documented placeholder snapshot
+    let stats = dashboard.get_dashboard_statistics();
+    assert_eq!(stats.total_identities, 0);
+    assert_eq!(stats.verified_identities, 0);
+    assert_eq!(stats.average_reputation_score, 500);
+    assert_eq!(stats.total_transactions, 0);
+    assert_eq!(stats.active_verifications, 0);
+    assert_eq!(stats.supported_chains, 5);
+    assert_eq!(stats.cross_chain_verifications, 0);
+    assert_eq!(stats.recovery_requests, 0);
 }

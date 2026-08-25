@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::needless_borrows_for_generic_args,
@@ -9,7 +10,7 @@
 use propchain_traits::{ComplianceChecker, *};
 
 #[ink::contract]
-mod compliance_registry {
+pub mod compliance_registry {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use propchain_traits::ComplianceOperation;

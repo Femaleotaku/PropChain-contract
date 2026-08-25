@@ -1,0 +1,25 @@
+[package]
+name = "propchain-common"
+version = "1.0.0"
+authors = ["PropChain Team <dev@propchain.io>"]
+edition = "2021"
+description = "Shared utilities for PropChain contracts (transaction-scoped caching)"
+license = "MIT"
+homepage = "https://propchain.io"
+repository = "https://github.com/MettaChain/PropChain-contract"
+publish = false
+
+[dependencies]
+ink = { workspace = true, default-features = false }
+scale = { workspace = true, default-features = false }
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = [
+    "ink/std",
+    "scale/std",
+]
+ink-as-dependency = []

@@ -339,18 +339,18 @@ mod tests {
     use ink::env::test::default_accounts;
 
     /// Build a fresh dashboard with zeroed-out state.
+    ///
+    /// Must be called from within an `#[ink::test]` so the mapping's lazy
+    /// storage accesses have an initialized off-chain environment.
     fn fresh() -> StakingDashboard {
-        ink::env::test::run_test::<ink::env::DefaultEnvironment, _>(|_| {
-            Ok(StakingDashboard {
-                staker_records: Mapping::default(),
-                total_staked: 0,
-                total_stakers: 0,
-                rewards_distributed: 0,
-                unclaimed_rewards: 0,
-                reward_per_token_stored: 0,
-            })
-        })
-        .unwrap()
+        StakingDashboard {
+            staker_records: Mapping::default(),
+            total_staked: 0,
+            total_stakers: 0,
+            rewards_distributed: 0,
+            unclaimed_rewards: 0,
+            reward_per_token_stored: 0,
+        }
     }
 
     fn accounts() -> ink::env::test::DefaultAccounts<ink::env::DefaultEnvironment> {

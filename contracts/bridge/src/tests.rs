@@ -1633,6 +1633,16 @@ mod tests {
         }
     }
 
+    fn multi_hop_metadata() -> PropertyMetadata {
+        PropertyMetadata {
+            location: String::from("Multi Hop Property"),
+            size: 1000,
+            legal_description: String::from("Test"),
+            valuation: 100000,
+            documents_url: String::from("ipfs://test"),
+        }
+    }
+
     #[ink::test]
     fn test_multisig_timeout_at_u64_max_does_not_wrap() {
         let mut bridge = setup_bridge();
@@ -1777,6 +1787,57 @@ mod tests {
         assert_eq!(
             window_one, window_two,
             "with a u64::MAX duration both transactions share one batch window"
+        );
+    }
+
+    #[ink::test]
+    fn test_multi_hop_empty_route_rejected_without_panic() {
+        let mut bridge = setup_bridge();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let result =
+            bridge.initiate_multi_hop_bridge(1, Vec::new(), accounts.bob, 2, Some(50), multi_hop_metadata());
+        assert_eq!(result.unwrap_err(), Error::InvalidChain);
+    }
+
+    #[ink::test]
+    fn test_multi_hop_single_hop_route_rejected() {
+        let mut bridge = setup_bridge();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let result = bridge.initiate_multi_hop_bridge(
+            1,
+            vec![2],
+            accounts.bob,
+            2,
+            Some(50),
+            multi_hop_metadata(),
+        );
+        assert_eq!(result.unwrap_err(), Error::InvalidChain);
+    }
+
+    #[ink::test]
+    fn test_multi_hop_valid_route_initiates_request() {
+        let mut bridge = setup_bridge();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        // Route must start away from the current chain (1) and stay supported
+        let result = bridge.initiate_multi_hop_bridge(
+            1,
+            vec![2, 3],
+            accounts.bob,
+            2,
+            Some(50),
+            multi_hop_metadata(),
+        );
+        let request_id = result.expect("valid two-hop route should be accepted");
+        assert!(request_id > 0);
+        assert_eq!(
+            bridge.get_multi_hop_status(request_id).unwrap(),
+            MultiHopStatus::InProgress
         );
     }
 }
