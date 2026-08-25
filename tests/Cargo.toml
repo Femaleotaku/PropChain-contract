@@ -22,7 +22,7 @@ ink_env = { version = "5.0.0", default-features = false }
 # Contract dependencies
 propchain-traits = { path = "../contracts/traits", default-features = false }
 propchain-contracts = { path = "../contracts/lib", default-features = false }
-propchain-monitoring = { path = "../contracts/monitoring", default-features = false, features = ["ink-as-dependency"] }
+propchain-monitoring = { path = "../contracts/monitoring", default-features = false }
 compliance_registry = { path = "../contracts/compliance_registry", default-features = false }
 
 # Issue #488 / #487 / #489: contract crates needed for new test modules
@@ -32,6 +32,30 @@ staking = { path = "../contracts/staking", default-features = false }
 propchain-bridge = { path = "../contracts/bridge", default-features = false }
 oracle = { path = "../contracts/oracle", default-features = false }
 propchain-insurance = { path = "../contracts/insurance", default-features = false }
+# Issue #1013: third-party registry integration coverage
+propchain-third-party = { path = "../contracts/third-party", default-features = false }
+
+# Issue #1010: mock oracle integration coverage (no "mock" feature — prices
+# must come from explicit pushes only)
+mock-oracle = { path = "../contracts/mock-oracle", default-features = false }
+
+# Issue #1005 / #1006 / #1007: contract crates needed for new test modules
+propchain-gdpr = { path = "../contracts/gdpr", default-features = false }
+propchain-factory = { path = "../contracts/factory", default-features = false }
+ipfs-metadata = { path = "../contracts/ipfs-metadata", default-features = false }
+
+# Issue #1004: on-chain sanctions screening contract
+propchain-sanctions = { path = "../contracts/sanctions", default-features = false }
+
+# Issues #918-#925: contracts under integration test
+propchain-dex = { path = "../contracts/dex", default-features = false }
+propchain-lending = { path = "../contracts/lending", default-features = false }
+propchain-crowdfunding = { path = "../contracts/crowdfunding", default-features = false }
+property-management = { path = "../contracts/property-management", default-features = false }
+propchain-fees = { path = "../contracts/fees", default-features = false }
+propchain-analytics = { path = "../contracts/analytics", default-features = false }
+propchain-database = { path = "../contracts/database", default-features = false }
+propchain-identity = { path = "../contracts/identity", default-features = false }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"], optional = true }
@@ -44,7 +68,7 @@ rand = "0.8"
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
 propchain-contracts = { path = "../contracts/lib", default-features = false }
-propchain-monitoring = { path = "../contracts/monitoring", default-features = false, features = ["ink-as-dependency"] }
+propchain-monitoring = { path = "../contracts/monitoring", default-features = false }
 compliance_registry = { path = "../contracts/compliance_registry", default-features = false }
 proptest = { version = "1.4", features = ["std"] }
 
@@ -62,6 +86,20 @@ std = [
     "staking/std",
     "propchain-bridge/std",
     "propchain-insurance/std",
+    "propchain-third-party/std",
+    "mock-oracle/std",
+    "propchain-gdpr/std",
+    "propchain-factory/std",
+    "ipfs-metadata/std",
+    "propchain-sanctions/std",
+    "propchain-dex/std",
+    "propchain-lending/std",
+    "propchain-crowdfunding/std",
+    "property-management/std",
+    "propchain-fees/std",
+    "propchain-analytics/std",
+    "propchain-database/std",
+    "propchain-identity/std",
     "serde/std",
     "serde_json/std",
     "tokio",
@@ -72,3 +110,37 @@ disabled_test = []
 
 
 
+
+# Issues #918-#925: explicit integration-test targets (the package root is
+# the tests/ directory itself, so cargo cannot auto-discover test files)
+[[test]]
+name = "integration_dex"
+path = "integration_dex.rs"
+
+[[test]]
+name = "integration_lending"
+path = "integration_lending.rs"
+
+[[test]]
+name = "integration_crowdfunding"
+path = "integration_crowdfunding.rs"
+
+[[test]]
+name = "integration_property_management"
+path = "integration_property_management.rs"
+
+[[test]]
+name = "integration_database"
+path = "integration_database.rs"
+
+[[test]]
+name = "integration_fees"
+path = "integration_fees.rs"
+
+[[test]]
+name = "integration_analytics"
+path = "integration_analytics.rs"
+
+[[test]]
+name = "integration_identity"
+path = "integration_identity.rs"

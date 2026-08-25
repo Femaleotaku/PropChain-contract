@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use ink::storage::Mapping;
@@ -380,6 +381,114 @@ mod version_registry {
             let registry = default_registry();
             assert!(registry.get_deployment("nonexistent".into(), 1).is_none());
             assert!(registry.get_latest_version("nonexistent".into()).is_none());
+        }
+
+        // ── Issue #1009: with-version registration & gap handling ──
+
+        #[ink::test]
+        fn test_out_of_order_registration_keeps_both_and_latest_is_max() {
+            let mut registry = default_registry();
+
+            // Register version 100 first, then an older version 2.
+            registry
+                .register_deployment_with_version("svc".into(), 100, [1u8; 32])
+                .unwrap();
+            registry
+                .register_deployment_with_version("svc".into(), 2, [2u8; 32])
+                .unwrap();
+
+            // Both records retrievable.
+            let v100 = registry.get_deployment("svc".into(), 100).unwrap();
+            assert_eq!(v100.version, 100);
+            assert_eq!(v100.code_hash, [1u8; 32]);
+            let v2 = registry.get_deployment("svc".into(), 2).unwrap();
+            assert_eq!(v2.version, 2);
+            assert_eq!(v2.code_hash, [2u8; 32]);
+
+            // Latest tracks the highest registered version, not the last write.
+            assert_eq!(registry.get_latest_version("svc".into()), Some(100));
+        }
+
+        #[ink::test]
+        fn test_sequential_counter_not_corrupted_by_out_of_order_versions() {
+            let mut registry = default_registry();
+
+            registry
+                .register_deployment_with_version("svc".into(), 100, [1u8; 32])
+                .unwrap();
+            registry
+                .register_deployment_with_version("svc".into(), 2, [2u8; 32])
+                .unwrap();
+
+            // next_version advanced past 100 and registering v2 did not rewind
+            // it: the next sequential id continues after the highest version.
+            let next_id = registry.register_deployment("svc".into(), [3u8; 32]).unwrap();
+            assert_eq!(next_id, 101);
+            assert_eq!(
+                registry.get_deployment("svc".into(), 101).unwrap().code_hash,
+                [3u8; 32]
+            );
+            // Plain registration books itself as the newest deployment.
+            assert_eq!(registry.get_latest_version("svc".into()), Some(101));
+        }
+
+        #[ink::test]
+        fn test_zero_version_rejected_and_state_untouched() {
+            let mut registry = default_registry();
+
+            assert_eq!(
+                registry.register_deployment_with_version("svc".into(), 0, [1u8; 32]),
+                Err(Error::InvalidVersion)
+            );
+            // Rejected registration must not book any state.
+            assert_eq!(registry.get_latest_version("svc".into()), None);
+            assert!(registry.get_deployment("svc".into(), 0).is_none());
+
+            // Counter untouched: first sequential registration still gets 1.
+            let version = registry
+                .register_deployment("svc".into(), [1u8; 32])
+                .unwrap();
+            assert_eq!(version, 1);
+        }
+
+        #[ink::test]
+        fn test_duplicate_high_version_rejected() {
+            let mut registry = default_registry();
+
+            registry
+                .register_deployment_with_version("svc".into(), 42, [1u8; 32])
+                .unwrap();
+            // Same version, different code hash — still a conflict.
+            assert_eq!(
+                registry.register_deployment_with_version("svc".into(), 42, [2u8; 32]),
+                Err(Error::VersionAlreadyExists)
+            );
+            // Original record wins.
+            assert_eq!(
+                registry.get_deployment("svc".into(), 42).unwrap().code_hash,
+                [1u8; 32]
+            );
+        }
+
+        #[ink::test]
+        fn test_deployment_history_orders_ascending_and_skips_gaps() {
+            let mut registry = default_registry();
+
+            registry
+                .register_deployment_with_version("svc".into(), 100, [1u8; 32])
+                .unwrap();
+            registry
+                .register_deployment_with_version("svc".into(), 2, [2u8; 32])
+                .unwrap();
+            registry
+                .register_deployment("svc".into(), [3u8; 32])
+                .unwrap(); // fills version 101
+
+            let history = registry.get_deployment_history("svc".into());
+            // Versions 1..=100 are missing — only 3 records come back.
+            assert_eq!(history.len(), 3);
+            let versions: Vec<u32> = history.iter().map(|r| r.version).collect();
+            assert_eq!(versions, vec![2, 100, 101]);
         }
     }
 }

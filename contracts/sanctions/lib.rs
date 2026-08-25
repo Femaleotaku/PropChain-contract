@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::needless_borrows_for_generic_args,
@@ -6,7 +7,7 @@
 )]
 
 #[ink::contract]
-mod sanctions_screening {
+pub mod sanctions_screening {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
 
@@ -158,6 +159,8 @@ mod sanctions_screening {
         next_entity_id: u64,
         next_screening_id: u64,
         max_sanctioned_entities: u32,
+        /// Number of currently active (non-soft-deleted) sanctioned entities.
+        active_entity_count: u32,
         screening_threshold_days: u32,
     }
 
@@ -173,6 +176,7 @@ mod sanctions_screening {
                 next_entity_id: 1,
                 next_screening_id: 1,
                 max_sanctioned_entities: 10_000,
+                active_entity_count: 0,
                 screening_threshold_days: 90,
             }
         }
@@ -186,6 +190,12 @@ mod sanctions_screening {
 
         // ── Admin: Manage sanctioned entities ───────────────────────────────
 
+        /// Lists a new sanctioned entity.
+        ///
+        /// Admin only. Fails with [`Error::SanctionListFull`] when the number
+        /// of active entities has reached the configured cap (see
+        /// [`max_sanctioned_entities`](Self::max_sanctioned_entities));
+        /// soft-removing an entity frees its slot again.
         #[ink(message)]
         pub fn add_sanctioned_entity(
             &mut self,
@@ -195,6 +205,9 @@ mod sanctions_screening {
             sanction_level: SanctionLevel,
         ) -> Result<u64> {
             self.ensure_admin()?;
+            if self.active_entity_count >= self.max_sanctioned_entities {
+                return Err(Error::SanctionListFull);
+            }
             let entity_id = self.next_entity_id;
             self.next_entity_id = entity_id.checked_add(1).ok_or(Error::SanctionListFull)?;
 
@@ -210,6 +223,10 @@ mod sanctions_screening {
                 active: true,
             };
             self.sanctioned_entities.insert(entity_id, &entity);
+            self.active_entity_count = self
+                .active_entity_count
+                .checked_add(1)
+                .ok_or(Error::SanctionListFull)?;
             self.env().emit_event(EntitySanctioned {
                 entity_id,
                 sanction_level,
@@ -218,6 +235,11 @@ mod sanctions_screening {
             Ok(entity_id)
         }
 
+        /// Soft-removes (resolves) a sanctioned entity, freeing a list slot.
+        ///
+        /// Admin only. The historical record is kept for audit purposes but
+        /// marked inactive; the freed slot allows adding new entities even
+        /// when the list was previously full.
         #[ink(message)]
         pub fn remove_sanctioned_entity(&mut self, entity_id: u64) -> Result<()> {
             self.ensure_admin()?;
@@ -225,13 +247,16 @@ mod sanctions_screening {
                 .sanctioned_entities
                 .get(entity_id)
                 .ok_or(Error::EntityNotFound)?;
-            entity.active = false;
-            entity.resolved_at = Some(self.env().block_timestamp());
-            self.sanctioned_entities.insert(entity_id, &entity);
-            self.env().emit_event(EntityRemovedFromSanctions {
-                entity_id,
-                timestamp: self.env().block_timestamp(),
-            });
+            if entity.active {
+                entity.active = false;
+                entity.resolved_at = Some(self.env().block_timestamp());
+                self.sanctioned_entities.insert(entity_id, &entity);
+                self.active_entity_count = self.active_entity_count.saturating_sub(1);
+                self.env().emit_event(EntityRemovedFromSanctions {
+                    entity_id,
+                    timestamp: self.env().block_timestamp(),
+                });
+            }
             Ok(())
         }
 
@@ -442,6 +467,32 @@ mod sanctions_screening {
         pub fn screening_threshold(&self) -> u32 {
             self.screening_threshold_days
         }
+
+        /// Updates the maximum number of concurrently active sanctioned
+        /// entities (admin only).
+        ///
+        /// The cap starts at `10_000` from the constructor. Lowering it below
+        /// the current active count is allowed but blocks further additions
+        /// until entities are removed or the cap is raised again.
+        #[ink(message)]
+        pub fn set_max_sanctioned_entities(&mut self, max: u32) -> Result<()> {
+            self.ensure_admin()?;
+            self.max_sanctioned_entities = max;
+            Ok(())
+        }
+
+        /// Returns the maximum number of concurrently active sanctioned
+        /// entities.
+        #[ink(message)]
+        pub fn max_sanctioned_entities(&self) -> u32 {
+            self.max_sanctioned_entities
+        }
+
+        /// Returns the number of currently active sanctioned entities.
+        #[ink(message)]
+        pub fn active_entity_count(&self) -> u32 {
+            self.active_entity_count
+        }
     }
 
     impl Default for SanctionsScreening {
@@ -560,9 +611,165 @@ mod sanctions_screening {
             assert!(result.passed);
             assert_eq!(result.sanction_level, SanctionLevel::None);
         }
-    }
-}
 
-pub mod src {
-    pub mod constant_time_sanctions;
+        // ── Screening-threshold tests (Issue #1020) ────────────────────────────
+
+        #[ink::test]
+        fn test_non_admin_cannot_set_screening_threshold() {
+            let mut contract = default_contract();
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            let result = contract.set_screening_threshold(30);
+            assert_eq!(result, Err(Error::NotAuthorized));
+
+            // Threshold must be unchanged after the rejected update
+            assert_eq!(contract.screening_threshold(), 90);
+        }
+
+        #[ink::test]
+        fn test_admin_sets_screening_threshold() {
+            let mut contract = default_contract();
+
+            // Initial value is 90 days
+            assert_eq!(contract.screening_threshold(), 90);
+
+            contract.set_screening_threshold(30).expect("admin set");
+            assert_eq!(contract.screening_threshold(), 30);
+        }
+
+        #[ink::test]
+        fn test_screening_threshold_round_trips() {
+            let mut contract = default_contract();
+
+            contract.set_screening_threshold(30).expect("set 30");
+            assert_eq!(contract.screening_threshold(), 30);
+
+            // A second update overwrites the stored value
+            contract.set_screening_threshold(45).expect("set 45");
+            assert_eq!(contract.screening_threshold(), 45);
+
+            // Zero is accepted as a plain value (no special-casing)
+            contract.set_screening_threshold(0).expect("set 0");
+            assert_eq!(contract.screening_threshold(), 0);
+        }
+
+        #[ink::test]
+        fn test_threshold_update_emits_sanction_threshold_updated_event() {
+            use scale::Decode as _;
+
+            let mut contract = default_contract();
+            contract.set_screening_threshold(30).expect("admin set");
+
+            let events = ink::env::test::recorded_events().collect::<Vec<_>>();
+            assert_eq!(events.len(), 1);
+
+            let decoded =
+                SanctionThresholdUpdated::decode(&mut &events[0].data[..]).expect("decode event");
+            assert_eq!(decoded.threshold, 30);
+        #[ink::test]
+        fn test_add_entity_at_exact_cap_succeeds_next_fails() {
+            let mut contract = default_contract();
+            contract.set_max_sanctioned_entities(2).expect("set cap");
+
+            let first = contract
+                .add_sanctioned_entity(
+                    b"One".to_vec(),
+                    EntityType::Individual,
+                    1,
+                    SanctionLevel::Monitored,
+                )
+                .expect("first at boundary");
+            assert_eq!(contract.active_entity_count(), 1);
+
+            let _second = contract
+                .add_sanctioned_entity(
+                    b"Two".to_vec(),
+                    EntityType::Individual,
+                    2,
+                    SanctionLevel::Monitored,
+                )
+                .expect("second fills cap exactly");
+            assert_eq!(contract.active_entity_count(), 2);
+
+            let overflow = contract.add_sanctioned_entity(
+                b"Three".to_vec(),
+                EntityType::Individual,
+                3,
+                SanctionLevel::Monitored,
+            );
+            assert_eq!(overflow, Err(Error::SanctionListFull));
+        }
+
+        #[ink::test]
+        fn test_remove_frees_cap_slot() {
+            let mut contract = default_contract();
+            contract.set_max_sanctioned_entities(1).expect("set cap");
+
+            let id = contract
+                .add_sanctioned_entity(
+                    b"Full".to_vec(),
+                    EntityType::Corporation,
+                    7,
+                    SanctionLevel::Prohibited,
+                )
+                .expect("fills cap");
+
+            // Cap is full.
+            assert_eq!(
+                contract.add_sanctioned_entity(
+                    b"No Room".to_vec(),
+                    EntityType::Trust,
+                    8,
+                    SanctionLevel::Restricted
+                ),
+                Err(Error::SanctionListFull)
+            );
+
+            // Soft removal frees the slot for a subsequent add.
+            contract.remove_sanctioned_entity(id).expect("remove");
+            let replacement = contract
+                .add_sanctioned_entity(
+                    b"Frees Slot".to_vec(),
+                    EntityType::Trust,
+                    8,
+                    SanctionLevel::Restricted,
+                )
+                .expect("slot freed");
+            assert_ne!(replacement, id);
+        }
+
+        #[ink::test]
+        fn test_double_remove_counts_once_and_keeps_count_consistent() {
+            let mut contract = default_contract();
+            contract.set_max_sanctioned_entities(1).expect("set cap");
+            let id = contract
+                .add_sanctioned_entity(
+                    b"Once".to_vec(),
+                    EntityType::Individual,
+                    9,
+                    SanctionLevel::Monitored,
+                )
+                .expect("add");
+
+            contract.remove_sanctioned_entity(id).expect("first remove");
+            contract
+                .remove_sanctioned_entity(id)
+                .expect("idempotent remove");
+
+            assert_eq!(contract.active_entity_count(), 0);
+
+            // Removing an unknown entity is still an error.
+            assert_eq!(
+                contract.remove_sanctioned_entity(999),
+                Err(Error::EntityNotFound)
+            );
+        }
+
+        #[ink::test]
+        fn test_default_cap_is_ten_thousand() {
+            let contract = default_contract();
+            assert_eq!(contract.max_sanctioned_entities(), 10_000);
+        }
+    }
 }
