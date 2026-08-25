@@ -1310,6 +1310,30 @@ pub mod propchain_identity {
             Ok(())
         }
 
+        /// Admin: configure social recovery guardians for a target identity.
+        #[ink(message)]
+        pub fn set_recovery_guardians(
+            &mut self,
+            target_account: AccountId,
+            guardians: Vec<AccountId>,
+            threshold: u8,
+        ) -> Result<(), IdentityError> {
+            if self.env().caller() != self.admin {
+                return Err(IdentityError::Unauthorized);
+            }
+
+            let mut identity = self
+                .identities
+                .get(&target_account)
+                .ok_or(IdentityError::IdentityNotFound)?;
+
+            identity.social_recovery.guardians = guardians;
+            identity.social_recovery.threshold = threshold;
+            self.identities.insert(&target_account, &identity);
+
+            Ok(())
+        }
+
         /// Port an existing identity to a new account
         #[ink(message)]
         pub fn port_identity(&mut self, new_account: AccountId) -> Result<(), IdentityError> {
@@ -2193,5 +2217,10 @@ pub mod propchain_identity {
             let caller = self.env().caller();
             self.data_deletion_requests.get(caller)
         }
+    }
+
+    /// Dashboard interface exposing aggregated views over this registry.
+    pub mod dashboard {
+        include!("src/dashboard.rs");
     }
 }
