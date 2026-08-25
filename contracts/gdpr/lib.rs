@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::needless_borrows_for_generic_args,
@@ -572,6 +573,89 @@ mod gdpr_consent {
             contract.request_data_access().expect("request");
             let requests = contract.get_subject_requests(subject);
             assert_eq!(requests.len(), 2);
+        }
+
+        // ── Consent lifecycle: expiration & retention gating (#974) ────────
+
+        #[ink::test]
+        fn test_expire_consent_requires_admin() {
+            let mut contract = default_contract();
+            let subject = AccountId::from([0x02; 32]);
+            let id = contract
+                .grant_consent(subject, ProcessingPurpose::KYC, 1_000)
+                .expect("grant");
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(2_000);
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(subject);
+            assert_eq!(contract.expire_consent(id), Err(Error::NotAuthorized));
+        }
+
+        #[ink::test]
+        fn test_expire_consent_rejected_before_expiry() {
+            let mut contract = default_contract();
+            let id = contract
+                .grant_consent(AccountId::from([0x02; 32]), ProcessingPurpose::KYC, 10_000)
+                .expect("grant");
+            // Still inside its validity window, so expiry must be rejected.
+            assert_eq!(contract.expire_consent(id), Err(Error::ConsentNotFound));
+            let record = contract.get_consent(id).expect("should exist");
+            assert_eq!(record.status, ConsentStatus::Granted);
+        }
+
+        #[ink::test]
+        fn test_expire_consent_after_expiry_marks_expired() {
+            let mut contract = default_contract();
+            let subject = AccountId::from([0x02; 32]);
+            let id = contract
+                .grant_consent(subject, ProcessingPurpose::KYC, 1_000)
+                .expect("grant");
+            assert!(contract.check_consent(subject, ProcessingPurpose::KYC));
+
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(2_000);
+            // The consent is naturally stale for consumers...
+            assert!(!contract.check_consent(subject, ProcessingPurpose::KYC));
+            // ...and the admin can transition it to Expired.
+            contract.expire_consent(id).expect("expire after expiry");
+            let record = contract.get_consent(id).expect("should exist");
+            assert_eq!(record.status, ConsentStatus::Expired);
+
+            // Expiring again is rejected once it is no longer Granted.
+            assert_eq!(contract.expire_consent(id), Err(Error::ConsentNotFound));
+        }
+
+        #[ink::test]
+        fn test_retention_policy_requires_admin() {
+            let mut contract = default_contract();
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(AccountId::from([0x03; 32]));
+            assert_eq!(
+                contract.set_retention_policy(ProcessingPurpose::Marketing, 30, false),
+                Err(Error::NotAuthorized)
+            );
+            assert!(contract
+                .get_retention_policy(ProcessingPurpose::Marketing)
+                .is_none());
+        }
+
+        #[ink::test]
+        fn test_retention_policy_round_trip_and_overwrite() {
+            let mut contract = default_contract();
+            contract
+                .set_retention_policy(ProcessingPurpose::TransactionMonitoring, 90, false)
+                .expect("set policy");
+            let policy = contract
+                .get_retention_policy(ProcessingPurpose::TransactionMonitoring)
+                .expect("should exist");
+            assert_eq!(policy.retention_days, 90);
+            assert!(!policy.auto_delete);
+
+            // Re-setting the same purpose replaces the stored policy.
+            contract
+                .set_retention_policy(ProcessingPurpose::TransactionMonitoring, 180, true)
+                .expect("overwrite policy");
+            let policy = contract
+                .get_retention_policy(ProcessingPurpose::TransactionMonitoring)
+                .expect("should exist");
+            assert_eq!(policy.retention_days, 180);
+            assert!(policy.auto_delete);
         }
     }
 }

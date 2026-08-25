@@ -169,3 +169,92 @@ pub fn finalize_round(
     round.status = RandomnessStatus::Finalized;
     Ok(random)
 }
+
+#[cfg(test)]
+mod tests {
+    use ink::primitives::AccountId;
+
+    use super::*;
+    use crate::crypto::compute_commitment;
+
+    fn account(byte: u8) -> AccountId {
+        AccountId::from([byte; 32])
+    }
+
+    #[test]
+    fn commit_reveal_round_produces_final_random() {
+        let mut round = create_round(7, 100, 10, 10);
+        assert_eq!(round.status, RandomnessStatus::Committing);
+        assert_eq!(round.commit_deadline, 110);
+        assert_eq!(round.reveal_deadline, 120);
+
+        let secret_a = [1u8; 32];
+        let secret_b = [2u8; 32];
+        let commit_a = compute_commitment(&secret_a, &account(1));
+        let commit_b = compute_commitment(&secret_b, &account(2));
+
+        assert!(add_commit(&mut round, account(1), commit_a, 105).is_ok());
+        // Duplicate commits from the same account are rejected.
+        assert_eq!(
+            add_commit(&mut round, account(1), commit_a, 105),
+            Err(CryptoError::InvalidRandomnessPhase)
+        );
+        assert!(add_commit(&mut round, account(2), commit_b, 105).is_ok());
+
+        // The reveal phase cannot start before the commit deadline.
+        assert_eq!(
+            start_reveal_phase(&mut round, 105),
+            Err(CryptoError::InvalidRandomnessPhase)
+        );
+        assert!(start_reveal_phase(&mut round, 111).is_ok());
+
+        // A wrong secret fails commitment verification.
+        assert_eq!(
+            add_reveal(&mut round, account(1), [9u8; 32], 112),
+            Err(CryptoError::CommitMismatch)
+        );
+        // An account that never committed cannot reveal.
+        assert_eq!(
+            add_reveal(&mut round, account(3), [3u8; 32], 112),
+            Err(CryptoError::InvalidRandomnessPhase)
+        );
+        assert!(add_reveal(&mut round, account(1), secret_a, 112).is_ok());
+        assert!(add_reveal(&mut round, account(2), secret_b, 112).is_ok());
+
+        // Early finalization is blocked to prevent last-revealer attacks.
+        assert_eq!(
+            finalize_round(&mut round, 115),
+            Err(CryptoError::InvalidRandomnessPhase)
+        );
+        let random = finalize_round(&mut round, 121).expect("finalizes");
+        assert_eq!(round.status, RandomnessStatus::Finalized);
+        assert_eq!(round.final_random, Some(random));
+
+        // The same revealed secrets always finalize to the same value.
+        assert_eq!(finalize_randomness(&[secret_a, secret_b]), random);
+    }
+
+    #[test]
+    fn too_few_commits_fail_the_round_instead_of_revealing() {
+        let mut round = create_round(1, 0, 5, 5);
+        let commit = compute_commitment(&[3u8; 32], &account(1));
+        assert!(add_commit(&mut round, account(1), commit, 3).is_ok());
+
+        assert_eq!(
+            start_reveal_phase(&mut round, 6),
+            Err(CryptoError::InsufficientReveals)
+        );
+        assert_eq!(round.status, RandomnessStatus::Failed);
+    }
+
+    #[test]
+    fn commits_are_rejected_after_the_deadline() {
+        let mut round = create_round(2, 0, 5, 5);
+        let commit = compute_commitment(&[4u8; 32], &account(1));
+        assert_eq!(
+            add_commit(&mut round, account(1), commit, 6),
+            Err(CryptoError::InvalidRandomnessPhase)
+        );
+        assert!(round.commits.is_empty());
+    }
+}

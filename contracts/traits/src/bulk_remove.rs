@@ -36,4 +36,11 @@ mod tests {
         assert_eq!(removed, 2);
         assert_eq!(count, 2);
     }
+
+    #[test]
+    fn empty_input_removes_nothing() {
+        let keys: Vec<u32> = Vec::new();
+        let removed = bulk_remove(&keys, 5, |_| {});
+        assert_eq!(removed, 0);
+    }
 }

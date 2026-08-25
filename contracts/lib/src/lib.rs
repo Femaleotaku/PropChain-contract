@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 #![allow(clippy::needless_borrows_for_generic_args)]
@@ -4758,6 +4759,228 @@ mod tests_pause {
         assert_eq!(
             contract.register_property(metadata),
             Err(Error::ExternalDependencyUnavailable)
+        );
+    }
+}
+
+// Fallback off-chain coverage for the `register_property` flow and the
+// value-bearing paths around it (issue #975).
+//
+// Decision record: the only integration suite exercising this aggregate
+// (`tests/integration_tests.rs`) is gated behind `--features e2e-tests`
+// because ink! e2e tests require a live substrate node, which none of the
+// repo's documented CI commands provide. Rather than wiring node-dependent
+// tests into the default run, these unit-level fallbacks pin the same
+// flows with the in-process `ink::test` backend so that
+// `cargo test --workspace` always covers them.
+#[cfg(test)]
+mod registry_fallback_tests {
+    use ink::env::{test, DefaultEnvironment};
+    use propchain_traits::PropertyMetadata;
+
+    use super::propchain_contracts::{Error, PropertyRegistry};
+
+    fn metadata(location: &str) -> PropertyMetadata {
+        PropertyMetadata {
+            location: location.into(),
+            size: 100,
+            legal_description: "Fallback coverage deed".into(),
+            valuation: 5_000,
+            documents_url: "ipfs://fallback".into(),
+        }
+    }
+
+    #[ink::test]
+    fn register_property_flow_runs_in_the_default_test_suite() {
+        let mut contract = PropertyRegistry::new();
+        let owner = test::default_accounts::<DefaultEnvironment>().alice;
+
+        let first = contract
+            .register_property(metadata("Fallback One"))
+            .expect("first registration");
+        let second = contract
+            .register_property(metadata("Fallback Two"))
+            .expect("second registration");
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(contract.property_count(), 2);
+
+        let stored = contract.get_property(first).expect("should exist");
+        assert_eq!(stored.owner, owner);
+        assert_eq!(stored.metadata.location, "Fallback One");
+        assert_eq!(stored.metadata.valuation, 5_000);
+
+        let owned = contract.get_owner_properties(owner);
+        assert_eq!(owned, vec![1, 2]);
+    }
+
+    #[ink::test]
+    fn register_property_rejects_invalid_metadata() {
+        let mut contract = PropertyRegistry::new();
+
+        assert_eq!(
+            contract.register_property(PropertyMetadata {
+                location: "".into(),
+                size: 100,
+                legal_description: "Missing location".into(),
+                valuation: 5_000,
+                documents_url: "ipfs://fallback".into(),
+            }),
+            Err(Error::InvalidMetadata)
+        );
+        assert_eq!(
+            contract.register_property(PropertyMetadata {
+                location: "Too Small".into(),
+                size: 0,
+                legal_description: "Below MIN_PROPERTY_SIZE".into(),
+                valuation: 5_000,
+                documents_url: "ipfs://fallback".into(),
+            }),
+            Err(Error::ValueOutOfBounds)
+        );
+        assert_eq!(
+            contract.register_property(PropertyMetadata {
+                location: "No Value".into(),
+                size: 100,
+                legal_description: "Below MIN_VALUATION".into(),
+                valuation: 0,
+                documents_url: "ipfs://fallback".into(),
+            }),
+            Err(Error::ValueOutOfBounds)
+        );
+        assert_eq!(contract.property_count(), 0);
+    }
+
+    #[ink::test]
+    fn transfer_property_updates_owner_mappings_and_gates_callers() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let mut contract = PropertyRegistry::new();
+        let property_id = contract
+            .register_property(metadata("Transferable"))
+            .expect("registration");
+
+        // A third party cannot move someone else's property.
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        assert_eq!(
+            contract.transfer_property(property_id, accounts.bob),
+            Err(Error::Unauthorized)
+        );
+
+        // The current owner can.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        contract
+            .transfer_property(property_id, accounts.bob)
+            .expect("transfer");
+
+        assert_eq!(
+            contract
+                .get_property(property_id)
+                .expect("should exist")
+                .owner,
+            accounts.bob
+        );
+        assert!(contract.get_owner_properties(accounts.alice).is_empty());
+        assert_eq!(
+            contract.get_owner_properties(accounts.bob),
+            vec![property_id]
+        );
+
+        // And the new owner can pass it on again.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        contract
+            .transfer_property(property_id, accounts.charlie)
+            .expect("re-transfer");
+        assert_eq!(
+            contract
+                .get_property(property_id)
+                .expect("should exist")
+                .owner,
+            accounts.charlie
+        );
+    }
+
+    #[ink::test]
+    fn escrow_lifecycle_covers_release_refund_and_authorization() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let mut contract = PropertyRegistry::new();
+        let property_id = contract
+            .register_property(metadata("Escrowed"))
+            .expect("registration");
+
+        // Seller-side validation errors.
+        assert_eq!(
+            contract.create_escrow(999, accounts.bob, 1_000),
+            Err(Error::PropertyNotFound)
+        );
+        assert_eq!(
+            contract.create_escrow(property_id, accounts.bob, 0),
+            Err(Error::ValueOutOfBounds)
+        );
+
+        let escrow_id = contract
+            .create_escrow(property_id, accounts.bob, 1_000)
+            .expect("escrow creation");
+        let escrow = contract.get_escrow(escrow_id).expect("should exist");
+        assert_eq!(escrow.buyer, accounts.bob);
+        assert_eq!(escrow.seller, accounts.alice);
+        assert!(!escrow.released);
+
+        // Third parties can neither release nor refund.
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        assert_eq!(contract.release_escrow(escrow_id), Err(Error::Unauthorized));
+        assert_eq!(contract.refund_escrow(escrow_id), Err(Error::Unauthorized));
+
+        // The seller refunds; the escrow is then closed for good.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        contract.refund_escrow(escrow_id).expect("refund");
+        assert!(
+            contract
+                .get_escrow(escrow_id)
+                .expect("should exist")
+                .released
+        );
+        assert_eq!(
+            contract.refund_escrow(escrow_id),
+            Err(Error::EscrowAlreadyReleased)
+        );
+    }
+
+    #[ink::test]
+    fn escrow_release_by_buyer_surfaces_the_self_transfer_guard() {
+        // Known defect (documented here so a fix cannot slip silently):
+        // release_escrow delegates to transfer_property(property, buyer)
+        // while the caller IS the buyer, so ensure_not_self rejects every
+        // release with SelfTransferNotAllowed. The happy path cannot be
+        // exercised until release_escrow routes the ownership move through
+        // an internal helper that skips the caller==recipient guard.
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let mut contract = PropertyRegistry::new();
+        let property_id = contract
+            .register_property(metadata("Sold Via Escrow"))
+            .expect("registration");
+        let escrow_id = contract
+            .create_escrow(property_id, accounts.bob, 1_000)
+            .expect("escrow creation");
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(
+            contract.release_escrow(escrow_id),
+            Err(Error::SelfTransferNotAllowed)
+        );
+
+        // Nothing moved: ownership and escrow state are untouched.
+        assert_eq!(
+            contract
+                .get_property(property_id)
+                .expect("should exist")
+                .owner,
+            accounts.alice
+        );
+        assert!(
+            !contract
+                .get_escrow(escrow_id)
+                .expect("should exist")
+                .released
         );
     }
 }

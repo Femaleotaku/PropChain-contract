@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::arithmetic_side_effects,
@@ -1432,7 +1433,9 @@ pub use crate::propchain_crowdfunding::{CrowdfundingError, RealEstateCrowdfundin
 mod tests {
     #[allow(unused_imports)]
     use ink::env::{test, DefaultEnvironment};
-    use propchain_crowdfunding::{CampaignStatus, CrowdfundingError, RealEstateCrowdfunding};
+    use propchain_crowdfunding::{
+        CampaignStatus, CrowdfundingError, MilestoneStatus, RealEstateCrowdfunding,
+    };
 
     use super::*;
 
@@ -1819,5 +1822,104 @@ mod tests {
         assert_eq!(demographics.total_investors, 2);
         assert_eq!(demographics.average_investment, 75_000);
         assert!(!demographics.jurisdictions.is_empty());
+    }
+
+    // ── Value-out paths: milestone release & refund eligibility (#977) ────
+
+    /// Activates a campaign and funds it exactly to target as `bob`,
+    /// leaving the caller set back to the admin.
+    fn fund_campaign_to_target(contract: &mut RealEstateCrowdfunding, campaign_id: u64) {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        contract.activate_campaign(campaign_id).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        contract.onboard_investor("US".into(), false).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        contract.verify_accreditation(accounts.bob).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        contract.invest(campaign_id, 100_000).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+    }
+
+    #[ink::test]
+    fn test_unauthorized_milestone_approval_rejected() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract
+            .create_campaign("Approval Gate".into(), 100_000)
+            .unwrap();
+        let milestone_id = contract
+            .add_milestone(campaign_id, "Framing".into(), 25_000)
+            .unwrap();
+
+        // Only the admin may approve milestones.
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        assert_eq!(
+            contract.approve_milestone(milestone_id),
+            Err(CrowdfundingError::Unauthorized)
+        );
+        let milestone = contract.get_milestone(milestone_id).unwrap();
+        assert_ne!(milestone.status, MilestoneStatus::Approved);
+    }
+
+    #[ink::test]
+    fn test_release_before_approval_rejected() {
+        let mut contract = setup();
+        let campaign_id = contract
+            .create_campaign("Order Check".into(), 100_000)
+            .unwrap();
+        let milestone_id = contract
+            .add_milestone(campaign_id, "Roofing".into(), 25_000)
+            .unwrap();
+
+        // Release must follow approval; a Pending milestone cannot release.
+        assert_eq!(
+            contract.release_milestone(milestone_id),
+            Err(CrowdfundingError::MilestoneNotApproved)
+        );
+    }
+
+    #[ink::test]
+    fn test_double_release_rejected_after_release() {
+        let mut contract = setup();
+        let campaign_id = contract
+            .create_campaign("One Shot".into(), 100_000)
+            .unwrap();
+        let milestone_id = contract
+            .add_milestone(campaign_id, "Handover".into(), 25_000)
+            .unwrap();
+        // Admin acts as its own oracle for verification.
+        contract
+            .oracle_verify_milestone(milestone_id, [7u8; 32])
+            .unwrap();
+        contract.approve_milestone(milestone_id).unwrap();
+        contract.release_milestone(milestone_id).unwrap();
+
+        // The released capital is accounted once and cannot be released twice.
+        assert_eq!(
+            contract.release_milestone(milestone_id),
+            Err(CrowdfundingError::MilestoneNotApproved)
+        );
+    }
+
+    #[ink::test]
+    fn test_refund_rejected_for_funded_campaign() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let campaign_id = contract
+            .create_campaign("Funded Tower".into(), 100_000)
+            .unwrap();
+        fund_campaign_to_target(&mut contract, campaign_id);
+
+        assert_eq!(
+            contract.get_campaign(campaign_id).unwrap().status,
+            CampaignStatus::Funded
+        );
+        // Refunds are reserved for failed campaigns only.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(
+            contract.claim_refund(campaign_id),
+            Err(CrowdfundingError::CampaignNotFailed)
+        );
+        assert!(!contract.is_refunded(campaign_id, accounts.bob));
     }
 }

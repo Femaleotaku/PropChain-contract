@@ -41,7 +41,11 @@ mod tests {
 
     #[test]
     fn exposes_value_apy_and_liquidity() {
-        let position = FixedPosition { value: 1_000, apy_bps: 500, liquid: true };
+        let position = FixedPosition {
+            value: 1_000,
+            apy_bps: 500,
+            liquid: true,
+        };
         assert_eq!(position.value(), 1_000);
         assert_eq!(position.apy_bps(), 500);
         assert!(position.is_liquid());

@@ -12,7 +12,11 @@ pub struct TtlCache<V: Clone> {
 
 impl<V: Clone> TtlCache<V> {
     pub fn new(ttl: u32) -> Self {
-        Self { value: None, cached_at: 0, ttl }
+        Self {
+            value: None,
+            cached_at: 0,
+            ttl,
+        }
     }
 
     /// Returns the cached value if still fresh at `now`, else `None`.
@@ -45,5 +49,24 @@ mod tests {
         let mut cache: TtlCache<u32> = TtlCache::new(10);
         cache.set(42, 100);
         assert_eq!(cache.get(111), None);
+    }
+
+    #[test]
+    fn entry_is_stale_exactly_at_the_ttl_boundary() {
+        let mut cache: TtlCache<u32> = TtlCache::new(10);
+        cache.set(42, 100);
+        // now - cached_at == ttl is already stale; only strictly-fresher reads hit.
+        assert_eq!(cache.get(110), None);
+        assert_eq!(cache.get(109), Some(42));
+    }
+
+    #[test]
+    fn fresh_writes_reset_the_expiry_clock() {
+        let mut cache: TtlCache<u32> = TtlCache::new(10);
+        cache.set(1, 100);
+        assert_eq!(cache.get(108), Some(1));
+        cache.set(2, 108);
+        assert_eq!(cache.get(117), Some(2));
+        assert_eq!(cache.get(119), None);
     }
 }
