@@ -6,7 +6,7 @@
 )]
 
 #[ink::contract]
-mod sanctions_screening {
+pub mod sanctions_screening {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
 

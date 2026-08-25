@@ -22,7 +22,7 @@ ink_env = { version = "5.0.0", default-features = false }
 # Contract dependencies
 propchain-traits = { path = "../contracts/traits", default-features = false }
 propchain-contracts = { path = "../contracts/lib", default-features = false }
-propchain-monitoring = { path = "../contracts/monitoring", default-features = false, features = ["ink-as-dependency"] }
+propchain-monitoring = { path = "../contracts/monitoring", default-features = false }
 compliance_registry = { path = "../contracts/compliance_registry", default-features = false }
 
 # Issue #488 / #487 / #489: contract crates needed for new test modules
@@ -32,6 +32,9 @@ staking = { path = "../contracts/staking", default-features = false }
 propchain-bridge = { path = "../contracts/bridge", default-features = false }
 oracle = { path = "../contracts/oracle", default-features = false }
 propchain-insurance = { path = "../contracts/insurance", default-features = false }
+
+# Issue #1004: on-chain sanctions screening contract
+propchain-sanctions = { path = "../contracts/sanctions", default-features = false }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"], optional = true }
@@ -44,7 +47,7 @@ rand = "0.8"
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
 propchain-contracts = { path = "../contracts/lib", default-features = false }
-propchain-monitoring = { path = "../contracts/monitoring", default-features = false, features = ["ink-as-dependency"] }
+propchain-monitoring = { path = "../contracts/monitoring", default-features = false }
 compliance_registry = { path = "../contracts/compliance_registry", default-features = false }
 proptest = { version = "1.4", features = ["std"] }
 
@@ -62,6 +65,7 @@ std = [
     "staking/std",
     "propchain-bridge/std",
     "propchain-insurance/std",
+    "propchain-sanctions/std",
     "serde/std",
     "serde_json/std",
     "tokio",

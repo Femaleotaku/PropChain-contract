@@ -7,7 +7,7 @@
 )]
 
 #[ink::contract]
-mod governance {
+pub mod governance {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use propchain_traits::constants;

@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
 #[ink::contract]
-mod monitoring {
+pub mod monitoring {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use propchain_traits::constants;

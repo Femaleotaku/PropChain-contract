@@ -5343,6 +5343,7 @@ dependencies = [
  "propchain-contracts",
  "propchain-insurance",
  "propchain-monitoring",
+ "propchain-sanctions",
  "propchain-traits",
  "proptest",
  "rand 0.8.6",

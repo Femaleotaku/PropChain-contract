@@ -24,7 +24,7 @@ mod fraud_detection;
 
 /// Decentralized Property Insurance Platform
 #[ink::contract]
-mod propchain_insurance {
+pub mod propchain_insurance {
     use ink::prelude::string::String;
     use ink::prelude::vec::Vec;
     use propchain_traits::{non_reentrant, ReentrancyError, ReentrancyGuard};
