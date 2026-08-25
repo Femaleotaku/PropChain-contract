@@ -1006,7 +1006,10 @@ mod bridge {
                 return Err(Error::Unauthorized);
             }
 
-            self.check_and_update_rate_limits(caller, *route.last().unwrap(), 0, true)?;
+            // Non-panicking terminal-hop extraction: a caller-supplied route
+            // must never be able to unwind the message with an untyped panic.
+            let destination_chain = route.last().copied().ok_or(Error::InvalidChain)?;
+            self.check_and_update_rate_limits(caller, destination_chain, 0, true)?;
 
             self.ensure_token_not_frozen(token_id)?;
 
