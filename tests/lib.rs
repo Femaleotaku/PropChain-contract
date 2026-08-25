@@ -18,3 +18,11 @@ pub mod security_audit_runner;
 // ─── Regression Test Suite ───────────────────────────────────────────
 /// Issue #487: Regression test suite for all previously fixed bugs
 pub mod regression;
+
+// ─── Issue Integration Test Modules ──────────────────────────────────
+/// Issue #1005: GDPR consent management integration tests
+pub mod integration_gdpr;
+/// Issue #1006 + #1007: Contract factory and IPFS metadata registry integration tests
+pub mod integration_factory_ipfs;
+/// Issue #1008: Fractional share trading integration tests
+pub mod integration_fractional;

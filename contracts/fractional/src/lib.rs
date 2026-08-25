@@ -7,7 +7,7 @@
 )]
 
 #[ink::contract]
-mod fractional {
+pub mod fractional {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use propchain_traits::{self, non_reentrant, ReentrancyError, ReentrancyGuard};

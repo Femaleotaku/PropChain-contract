@@ -6,7 +6,7 @@
 )]
 
 #[ink::contract]
-mod gdpr_consent {
+pub mod gdpr_consent {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
 

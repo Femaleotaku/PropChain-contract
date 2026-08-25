@@ -7,7 +7,7 @@ use ink::storage::Mapping;
 
 #[ink::contract]
 #[allow(clippy::too_many_arguments)]
-mod ipfs_metadata {
+pub mod ipfs_metadata {
     use super::*;
 
     // ============================================================================
