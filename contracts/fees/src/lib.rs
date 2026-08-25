@@ -17,7 +17,7 @@ use propchain_traits::{DynamicFeeProvider, FeeOperation};
 // every test after every include isn't worth the structural churn, so
 // suppress the lint here.
 #[allow(clippy::items_after_test_module)]
-mod propchain_fees {
+pub mod propchain_fees {
     use super::*;
 
     /// Basis points denominator (10000 = 100%)
@@ -413,11 +413,16 @@ mod propchain_fees {
             Ok(())
         }
 
+        /// Returns the premium listing auction with the given id, if it exists.
         #[ink(message)]
         pub fn get_auction(&self, auction_id: u64) -> Option<PremiumAuction> {
             self.auctions.get(auction_id)
         }
 
+        /// Returns the total number of premium listing auctions created so far.
+        ///
+        /// Auction ids are assigned sequentially starting at 1, so this value is
+        /// also the highest allocated auction id.
         #[ink(message)]
         pub fn get_auction_count(&self) -> u64 {
             self.auction_count
@@ -425,6 +430,10 @@ mod propchain_fees {
 
         // ========== Incentives and distribution ==========
 
+        /// Registers `account` as a fee validator eligible for reward distribution.
+        ///
+        /// Caller requirement: admin only (`FeeError::Unauthorized` otherwise).
+        /// Idempotent: registering an already-active validator is a no-op.
         #[ink(message)]
         pub fn add_validator(&mut self, account: AccountId) -> Result<(), FeeError> {
             self.ensure_admin()?;
@@ -436,6 +445,11 @@ mod propchain_fees {
             Ok(())
         }
 
+        /// Removes `account` from the fee validator set.
+        ///
+        /// Caller requirement: admin only (`FeeError::Unauthorized` otherwise).
+        /// Removing an address that was never registered succeeds silently.
+        /// Any pending rewards for the removed validator remain claimable.
         #[ink(message)]
         pub fn remove_validator(&mut self, account: AccountId) -> Result<(), FeeError> {
             self.ensure_admin()?;
@@ -444,6 +458,12 @@ mod propchain_fees {
             Ok(())
         }
 
+        /// Sets how collected fees are split between validators and the treasury.
+        ///
+        /// Both shares are expressed in basis points (1 bps = 0.01%, denominator
+        /// 10_000). The two shares must not sum to more than 10_000 bps, otherwise
+        /// `FeeError::InvalidConfig` is returned and nothing changes.
+        /// Caller requirement: admin only (`FeeError::Unauthorized` otherwise).
         #[ink(message)]
         pub fn set_distribution_rates(
             &mut self,
@@ -525,6 +545,11 @@ mod propchain_fees {
             Ok(amount)
         }
 
+        /// Returns the reward amount currently claimable by `account`.
+        ///
+        /// Balances accrue via `distribute_fees` (validator share) and are
+        /// claimed with `claim_rewards`; accounts with no pending rewards
+        /// report 0.
         #[ink(message)]
         pub fn pending_reward(&self, account: AccountId) -> u128 {
             self.pending_rewards.get(account).unwrap_or(0)
@@ -615,16 +640,30 @@ mod propchain_fees {
             rec
         }
 
+        /// Returns the admin account configured at deployment.
+        ///
+        /// The admin is the sole caller allowed to change fee parameters,
+        /// validator membership, and distribution rates.
         #[ink(message)]
         pub fn admin(&self) -> AccountId {
             self.admin
         }
 
+        /// Returns the fixed `FeeConfig` (base/min/max fee in planck units)
+        /// captured at construction time.
+        ///
+        /// This is the immutable baseline; live parameters are reflected in
+        /// `get_fee_report` instead.
         #[ink(message)]
         pub fn default_config(&self) -> FeeConfig {
             self.default_config.clone()
         }
 
+        /// Returns the current unallocated treasury balance available for
+        /// distribution.
+        ///
+        /// Funds enter via `record_fee_collected` and leave when the admin
+        /// calls `distribute_fees`.
         #[ink(message)]
         pub fn fee_treasury(&self) -> u128 {
             self.fee_treasury
@@ -696,6 +735,11 @@ mod propchain_fees {
     }
 
     impl DynamicFeeProvider for FeeManager {
+        /// Recommended fee for `operation` under the dynamic fee model.
+        ///
+        /// Delegates to `calculate_fee`, which applies the configured base fee
+        /// (bps), congestion multiplier, and the operation's max-fee cap (bps,
+        /// denominator 10_000 in both cases). Read-only; any caller may query it.
         #[ink(message)]
         fn get_recommended_fee(&self, operation: FeeOperation) -> u128 {
             self.calculate_fee(operation)

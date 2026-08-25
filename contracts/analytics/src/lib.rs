@@ -7,7 +7,7 @@ use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
 
 #[ink::contract]
-mod propchain_analytics {
+pub mod propchain_analytics {
     use super::*;
 
     /// Market metrics representing aggregated property data.
