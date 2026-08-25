@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
 //! # PropChain Multicall Contract
@@ -24,7 +25,7 @@ use propchain_traits::multicall::{CallRequest, CallResult, MulticallError};
 const MAX_MULTICALL_SIZE: u32 = MAX_BATCH_SIZE;
 
 #[ink::contract]
-mod propchain_multicall {
+pub mod propchain_multicall {
     use super::*;
 
     // ── Events ────────────────────────────────────────────────────────────
@@ -67,6 +68,7 @@ mod propchain_multicall {
     impl MulticallContract {
         /// Deploy the multicall contract.
         #[ink(constructor)]
+        #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             Self {
                 admin: Self::env().caller(),

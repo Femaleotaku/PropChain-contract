@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 //! PropChain Test Suite
 //!
 //! This module provides the test library for PropChain contracts,

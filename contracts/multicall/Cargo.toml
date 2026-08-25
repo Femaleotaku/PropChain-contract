@@ -14,7 +14,7 @@ propchain-traits = { path = "../traits", default-features = false }
 [lib]
 name = "propchain_multicall"
 path = "src/lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["std"]

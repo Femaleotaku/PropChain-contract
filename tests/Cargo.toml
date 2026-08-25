@@ -23,15 +23,16 @@ ink_env = { version = "5.0.0", default-features = false }
 propchain-traits = { path = "../contracts/traits", default-features = false }
 propchain-contracts = { path = "../contracts/lib", default-features = false }
 propchain-monitoring = { path = "../contracts/monitoring", default-features = false, features = ["ink-as-dependency"] }
-compliance_registry = { path = "../contracts/compliance_registry", default-features = false }
 
 # Issue #488 / #487 / #489: contract crates needed for new test modules
-fractional = { path = "../contracts/fractional", default-features = false }
 governance = { path = "../contracts/governance", default-features = false }
 staking = { path = "../contracts/staking", default-features = false }
 propchain-bridge = { path = "../contracts/bridge", default-features = false }
 oracle = { path = "../contracts/oracle", default-features = false }
 propchain-insurance = { path = "../contracts/insurance", default-features = false }
+# Issues #926 / #927: batching and prediction-market coverage targets
+propchain-multicall = { path = "../contracts/multicall", default-features = false }
+propchain-prediction-market = { path = "../contracts/prediction-market", default-features = false }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"], optional = true }
@@ -45,8 +46,17 @@ rand = "0.8"
 tokio = { version = "1.0", features = ["full"] }
 propchain-contracts = { path = "../contracts/lib", default-features = false }
 propchain-monitoring = { path = "../contracts/monitoring", default-features = false, features = ["ink-as-dependency"] }
-compliance_registry = { path = "../contracts/compliance_registry", default-features = false }
 proptest = { version = "1.4", features = ["std"] }
+
+# The package root is this tests/ directory, so cargo cannot auto-discover
+# integration test files — each suite must be declared explicitly.
+[[test]]
+name = "integration_multicall"
+path = "integration_multicall.rs"
+
+[[test]]
+name = "integration_prediction_market"
+path = "integration_prediction_market.rs"
 
 [features]
 default = ["std"]
@@ -56,12 +66,12 @@ std = [
     "scale-info/std",
     "propchain-contracts/std",
     "propchain-monitoring/std",
-    "compliance_registry/std",
-    "fractional/std",
     "governance/std",
     "staking/std",
     "propchain-bridge/std",
     "propchain-insurance/std",
+    "propchain-multicall/std",
+    "propchain-prediction-market/std",
     "serde/std",
     "serde_json/std",
     "tokio",
