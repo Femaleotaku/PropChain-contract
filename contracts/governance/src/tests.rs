@@ -282,5 +282,192 @@ mod tests {
         // Proposal participation rate query
         assert_eq!(gov.get_proposal_participation(0).unwrap(), 6666);
     }
+
+    // =========================================================================
+    // Voting Privacy: commit / reveal / signed voting (Issue #998)
+    // =========================================================================
+
+    /// Commitment must reproduce the exact encoding used by `reveal_vote`:
+    /// hash_encoded((proposal_id, caller, support, salt)).
+    fn commitment_for(proposal_id: u64, caller: AccountId, support: bool, salt: [u8; 32]) -> Hash {
+        propchain_traits::crypto::hash_encoded(&(proposal_id, caller, support, salt))
+    }
+
+    #[ink::test]
+    fn commit_and_reveal_records_private_vote() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        set_caller(accounts.alice);
+        gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None)
+            .unwrap();
+
+        let salt = [0x2A; 32];
+        set_caller(accounts.bob);
+        gov.commit_vote(0, commitment_for(0, accounts.bob, true, salt))
+            .unwrap();
+
+        // Reveal before the reveal phase started is rejected.
+        assert_eq!(
+            gov.reveal_vote(0, true, salt),
+            Err(Error::ProposalClosed)
+        );
+
+        // Any signer may start the reveal phase; starting it twice is rejected.
+        set_caller(accounts.alice);
+        gov.start_reveal_phase(0).unwrap();
+        assert!(gov.is_reveal_phase_started(0));
+        assert_eq!(
+            gov.start_reveal_phase(0),
+            Err(Error::AlreadyVoted)
+        );
+
+        // A wrong salt does not match the commitment.
+        set_caller(accounts.bob);
+        let wrong_salt = [0x00; 32];
+        assert_eq!(
+            gov.reveal_vote(0, true, wrong_salt),
+            Err(Error::Unauthorized)
+        );
+
+        // Revealing with a support flag different from the committed one also
+        // mismatches (the vote is part of the hashed message).
+        assert_eq!(
+            gov.reveal_vote(0, false, salt),
+            Err(Error::Unauthorized)
+        );
+
+        // The correct reveal records the vote.
+        gov.reveal_vote(0, true, salt).unwrap();
+        let proposal = gov.get_proposal(0).unwrap();
+        assert_eq!(proposal.votes_for, 1);
+        assert_eq!(proposal.status, ProposalStatus::Active);
+
+        // The commitment was cleared to prevent double reveals.
+        assert_eq!(
+            gov.reveal_vote(0, true, salt),
+            Err(Error::AlreadyVoted)
+        );
+    }
+
+    #[ink::test]
+    fn commit_vote_rejects_non_signers_and_bad_state() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        let salt = [0x11; 32];
+
+        // Only signers may commit.
+        set_caller(accounts.django);
+        assert_eq!(
+            gov.commit_vote(0, commitment_for(0, accounts.django, true, salt)),
+            Err(Error::NotASigner)
+        );
+
+        // Unknown proposal id.
+        set_caller(accounts.bob);
+        assert_eq!(
+            gov.commit_vote(42, commitment_for(42, accounts.bob, true, salt)),
+            Err(Error::ProposalNotFound)
+        );
+
+        set_caller(accounts.alice);
+        gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None)
+            .unwrap();
+
+        set_caller(accounts.bob);
+        gov.commit_vote(0, commitment_for(0, accounts.bob, false, salt))
+            .unwrap();
+
+        // A second commitment from the same voter is rejected.
+        assert_eq!(
+            gov.commit_vote(0, commitment_for(0, accounts.bob, false, salt)),
+            Err(Error::AlreadyVoted)
+        );
+
+        // Non-signers cannot start the reveal phase either.
+        set_caller(accounts.django);
+        assert_eq!(
+            gov.start_reveal_phase(0),
+            Err(Error::NotASigner)
+        );
+
+        // Reveal from a voter without any commitment fails once the phase is
+        // open (the missing commitment maps to AlreadyVoted).
+        set_caller(accounts.alice);
+        gov.start_reveal_phase(0).unwrap();
+        set_caller(accounts.charlie);
+        assert_eq!(
+            gov.reveal_vote(0, true, salt),
+            Err(Error::AlreadyVoted)
+        );
+    }
+
+    #[ink::test]
+    fn vote_with_signature_without_signature_is_plain_vote() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        set_caller(accounts.alice);
+        gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None)
+            .unwrap();
+
+        set_caller(accounts.bob);
+        gov.vote_with_signature(0, true, None).unwrap();
+        let proposal = gov.get_proposal(0).unwrap();
+        assert_eq!(proposal.votes_for, 1);
+    }
+
+    #[ink::test]
+    fn vote_with_signature_rejects_missing_key_and_invalid_signature() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        set_caller(accounts.alice);
+        gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None)
+            .unwrap();
+
+        // An approval supplied by a caller with no registered public key is
+        // rejected before any signature math runs. The signature bytes are
+        // canonical (r/s < curve order, recovery id 0/1) so the engine would
+        // recover cleanly rather than panic if it got that far.
+        let mut sig = [0x7Fu8; 65];
+        sig[64] = 0x01; // recovery id
+        let approval = propchain_traits::SignedApproval {
+            signature: sig,
+            message_hash: [0x01; 32],
+        };
+        set_caller(accounts.bob);
+        assert_eq!(
+            gov.vote_with_signature(0, true, Some(approval.clone())),
+            Err(Error::Unauthorized)
+        );
+        assert_eq!(gov.get_proposal(0).unwrap().votes_for, 0);
+
+        // With a key registered, an unrecoverable signature still fails and
+        // no vote is recorded.
+        set_caller(accounts.alice);
+        gov.register_public_key([0x02; 33]).unwrap();
+        assert_eq!(
+            gov.vote_with_signature(0, true, Some(approval)),
+            Err(Error::Unauthorized)
+        );
+        assert_eq!(gov.get_proposal(0).unwrap().votes_for, 0);
+    }
+
+    #[ink::test]
+    fn register_public_key_requires_signer() {
+        let mut gov = create_governance();
+        let accounts = default_accounts();
+
+        set_caller(accounts.alice);
+        assert!(gov.register_public_key([0x03; 33]).is_ok());
+
+        set_caller(accounts.django);
+        assert_eq!(
+            gov.register_public_key([0x04; 33]),
+            Err(Error::NotASigner)
+        );
+    }
 }
 

@@ -78,7 +78,8 @@ mod insurance_tests {
     use ink::env::{test, DefaultEnvironment};
 
     use crate::propchain_insurance::{
-        ClaimStatus, CoverageType, InsuranceError, PolicyStatus, PropertyInsurance,
+        ClaimStatus, CoverageType, InsuranceError, PayoutMode, PolicyStatus, PropertyInsurance,
+        TriggerComparator, TriggerMetric,
     };
 
     fn setup() -> PropertyInsurance {
@@ -1694,6 +1695,322 @@ mod insurance_tests {
         let ids = contract.get_holder_parametric_policies(accounts.bob);
         assert_eq!(ids.len(), 1);
     }
+
+    // =========================================================================
+    // CLAIM TRIGGERS / ORACLE EVENTS (Issue #999)
+    // =========================================================================
+
+    /// Create a pool, fund it, assess the risk and buy an Active policy as bob.
+    fn create_active_policy(contract: &mut PropertyInsurance) -> u64 {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let pool_id = create_pool(contract);
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        test::set_value_transferred::<DefaultEnvironment>(10_000_000_000_000u128);
+        contract.provide_pool_liquidity(pool_id).unwrap();
+        add_risk_assessment(contract, 1);
+        let calc = contract
+            .calculate_premium(1, 500_000_000_000u128, CoverageType::Fire)
+            .unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        test::set_value_transferred::<DefaultEnvironment>(calc.annual_premium * 2);
+        contract
+            .create_policy(
+                1,
+                CoverageType::Fire,
+                500_000_000_000u128,
+                pool_id,
+                86_400 * 365,
+                "ipfs://policy-metadata".into(),
+            )
+            .expect("policy creation failed")
+    }
+
+    #[ink::test]
+    fn test_register_claim_trigger_works() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        // The policyholder may register a trigger on their own policy.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            )
+            .expect("trigger registration failed");
+
+        assert_eq!(trigger_id, 1);
+        assert_eq!(contract.get_trigger_count(), 1);
+        assert_eq!(contract.get_policy_triggers(policy_id), vec![trigger_id]);
+
+        let trigger = contract.get_claim_trigger(trigger_id).unwrap();
+        assert_eq!(trigger.policy_id, policy_id);
+        assert_eq!(trigger.metric, TriggerMetric::FloodDepthCm);
+        assert_eq!(trigger.comparator, TriggerComparator::GreaterOrEqual);
+        assert_eq!(trigger.threshold, 200);
+        assert!(trigger.is_active);
+        assert!(!trigger.triggered);
+        assert_eq!(trigger.last_observed_value, None);
+
+        // Admin may register too; ids increment.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        let second = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::WindSpeedKph,
+                TriggerComparator::LessOrEqual,
+                50,
+                PayoutMode::Fixed(1_000u128),
+            )
+            .unwrap();
+        assert_eq!(second, 2);
+        assert_eq!(
+            contract.get_policy_triggers(policy_id),
+            vec![trigger_id, second]
+        );
+    }
+
+    #[ink::test]
+    fn test_register_claim_trigger_unauthorized_and_missing_policy_fail() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        // A stranger may not register against bob's policy.
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        assert_eq!(
+            contract.register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            ),
+            Err(InsuranceError::Unauthorized)
+        );
+
+        // Unknown policy id.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(
+            contract.register_claim_trigger(
+                999,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            ),
+            Err(InsuranceError::PolicyNotFound)
+        );
+
+        // Invalid payout modes are rejected up front.
+        assert_eq!(
+            contract.register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::Fixed(0),
+            ),
+            Err(InsuranceError::InvalidPayoutMode)
+        );
+        assert_eq!(
+            contract.register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::PercentBps(10_001),
+            ),
+            Err(InsuranceError::InvalidPayoutMode)
+        );
+        assert_eq!(contract.get_trigger_count(), 0);
+    }
+
+    #[ink::test]
+    fn test_deactivate_claim_trigger_works_once() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::RainfallMm,
+                TriggerComparator::GreaterOrEqual,
+                100,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+
+        // Deactivating twice must fail: the second call sees an inactive
+        // trigger before any authorization check.
+        assert!(contract.deactivate_claim_trigger(trigger_id).is_ok());
+        let trigger = contract.get_claim_trigger(trigger_id).unwrap();
+        assert!(!trigger.is_active);
+        assert_eq!(
+            contract.deactivate_claim_trigger(trigger_id),
+            Err(InsuranceError::TriggerInactive)
+        );
+
+        // Strangers cannot deactivate a still-active trigger...
+        let other = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::WindSpeedKph,
+                TriggerComparator::LessOrEqual,
+                40,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        assert_eq!(
+            contract.deactivate_claim_trigger(other),
+            Err(InsuranceError::Unauthorized)
+        );
+
+        // ...and unknown ids report TriggerNotFound.
+        assert_eq!(
+            contract.deactivate_claim_trigger(999),
+            Err(InsuranceError::TriggerNotFound)
+        );
+    }
+
+    #[ink::test]
+    fn test_report_oracle_event_requires_admin_or_oracle() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+
+        // Neither the policyholder nor a stranger is an authorized reporter.
+        assert_eq!(
+            contract.report_oracle_event(trigger_id, 300, "ipfs://report".into()),
+            Err(InsuranceError::Unauthorized)
+        );
+
+        // Admin is always allowed and records the observation without firing
+        // when the condition is unmet.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            contract.report_oracle_event(trigger_id, 100, "ipfs://report".into()),
+            Ok(None)
+        );
+        let trigger = contract.get_claim_trigger(trigger_id).unwrap();
+        assert_eq!(trigger.last_observed_value, Some(100));
+        assert!(!trigger.triggered);
+        assert_eq!(contract.get_claim_count(), 0);
+    }
+
+    #[ink::test]
+    fn test_report_oracle_event_threshold_boundary_met_vs_unmet() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        // GreaterOrEqual with threshold 150: exactly 149 does not fire,
+        // exactly 150 does. The boundary itself is the decision point.
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::EarthquakeMagnitude,
+                TriggerComparator::GreaterOrEqual,
+                150,
+                PayoutMode::Fixed(10_000_000u128),
+            )
+            .unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            contract.report_oracle_event(trigger_id, 149, "ipfs://r".into()),
+            Ok(None)
+        );
+        assert!(!contract.get_claim_trigger(trigger_id).unwrap().triggered);
+
+        let claim_id = contract
+            .report_oracle_event(trigger_id, 150, "ipfs://r2".into())
+            .expect("boundary-met report must fire");
+        assert_eq!(claim_id, Some(1));
+    }
+
+    #[ink::test]
+    fn test_report_oracle_event_fires_claims_and_pays_exactly_once() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+        let pool_id = 1;
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+
+        // An authorized oracle (distinct from admin) fires the trigger.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        contract.authorize_oracle(accounts.charlie).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        let claim_id = contract
+            .report_oracle_event(trigger_id, 250, "ipfs://flood-report".into())
+            .expect("authorized oracle report failed");
+        assert_eq!(claim_id, Some(1));
+
+        // The auto-claim was created, approved and paid from the pool.
+        let claim = contract.get_claim(1).unwrap();
+        assert_eq!(claim.policy_id, policy_id);
+        assert_eq!(claim.claimant, accounts.bob);
+        assert_eq!(claim.status, ClaimStatus::Paid);
+        assert!(claim.payout_amount > 0);
+
+        let pool = contract.get_pool(pool_id).unwrap();
+        assert!(pool.total_claims_paid > 0);
+
+        // One-shot semantics: a re-fired trigger is rejected.
+        assert_eq!(
+            contract.report_oracle_event(trigger_id, 260, "ipfs://again".into()),
+            Err(InsuranceError::TriggerAlreadyFired)
+        );
+        let trigger = contract.get_claim_trigger(trigger_id).unwrap();
+        assert!(trigger.triggered);
+        assert_eq!(trigger.triggering_claim_id, Some(1));
+        assert!(trigger.triggered_at.is_some());
+
+        // Reporting to a deactivated trigger fails even for admin.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let other = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::TemperatureCelsius,
+                TriggerComparator::LessOrEqual,
+                -10,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+        contract.deactivate_claim_trigger(other).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            contract.report_oracle_event(other, 5, "ipfs://late".into()),
+            Err(InsuranceError::TriggerInactive)
+        );
+    }
 }
 
 // =========================================================================
@@ -1926,4 +2243,5 @@ mod insurance_admin_rotation_tests {
             Err(InsuranceError::KeyRotationCooldown)
         );
     }
+
 }
