@@ -528,5 +528,185 @@ mod propchain_third_party {
     // ========================================================================
 
     #[cfg(test)]
-    mod tests {}
+    mod tests {
+        use ink::env::{test, DefaultEnvironment};
+
+        use super::*;
+
+        fn setup() -> ThirdPartyIntegration {
+            test::set_caller::<DefaultEnvironment>(test::default_accounts::<DefaultEnvironment>().alice);
+            ThirdPartyIntegration::new()
+        }
+
+        fn register_kyc_provider(contract: &mut ThirdPartyIntegration, provider: AccountId) -> u32 {
+            contract
+                .register_service(
+                    ServiceType::KycProvider,
+                    "KYC Partner".into(),
+                    provider,
+                    "https://kyc.example".into(),
+                    "v1".into(),
+                    100,
+                )
+                .unwrap()
+        }
+
+        #[ink::test]
+        fn test_register_service_admin_only_and_validates_fee() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            // Non-admin registration is rejected
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            assert_eq!(
+                contract.register_service(
+                    ServiceType::KycProvider,
+                    "Rogue".into(),
+                    accounts.bob,
+                    "https://evil.example".into(),
+                    "v1".into(),
+                    0,
+                ),
+                Err(Error::Unauthorized)
+            );
+
+            // Admin can register and the config is queryable
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            let service_id = register_kyc_provider(&mut contract, accounts.charlie);
+            assert_eq!(service_id, 1);
+            let config = contract.get_service_config(service_id).unwrap();
+            assert_eq!(config.service_type, ServiceType::KycProvider);
+            assert_eq!(config.provider_account, accounts.charlie);
+            assert_eq!(config.status, ServiceStatus::Active);
+            assert_eq!(config.fee_percentage, 100);
+
+            // Fee percentage above the 10000 bps cap is rejected
+            assert_eq!(
+                contract.register_service(
+                    ServiceType::Other,
+                    "Greedy".into(),
+                    accounts.bob,
+                    "https://x.example".into(),
+                    "v1".into(),
+                    10_001,
+                ),
+                Err(Error::InvalidFeePercentage)
+            );
+        }
+
+        #[ink::test]
+        fn test_update_service_status_admin_or_provider_only() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+            let service_id = register_kyc_provider(&mut contract, accounts.charlie);
+
+            // A random account may not change the status
+            test::set_caller::<DefaultEnvironment>(accounts.eve);
+            assert_eq!(
+                contract.update_service_status(service_id, ServiceStatus::Suspended),
+                Err(Error::Unauthorized)
+            );
+
+            // The provider itself can suspend its own service
+            test::set_caller::<DefaultEnvironment>(accounts.charlie);
+            assert_eq!(
+                contract.update_service_status(service_id, ServiceStatus::Suspended),
+                Ok(())
+            );
+            let suspended = contract.get_service_config(service_id).unwrap();
+            assert_eq!(suspended.status, ServiceStatus::Suspended);
+
+            // Requests against a suspended service are rejected
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            assert_eq!(
+                contract.initiate_kyc_request(service_id, accounts.bob, "ref-1".into()),
+                Err(Error::ServiceInactive)
+            );
+        }
+
+        #[ink::test]
+        fn test_kyc_flow_updates_record_and_rejects_double_update() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+            let service_id = register_kyc_provider(&mut contract, accounts.charlie);
+
+            // Only the user itself (or admin) may initiate a request
+            test::set_caller::<DefaultEnvironment>(accounts.eve);
+            assert_eq!(
+                contract.initiate_kyc_request(service_id, accounts.bob, "ref-2".into()),
+                Err(Error::Unauthorized)
+            );
+
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            let request_id =
+                contract.initiate_kyc_request(service_id, accounts.bob, "ref-3".into()).unwrap();
+
+            // Only the provider may resolve the request
+            test::set_caller::<DefaultEnvironment>(accounts.eve);
+            assert_eq!(
+                contract.update_kyc_status(request_id, RequestStatus::Approved, 3, 30),
+                Err(Error::Unauthorized)
+            );
+
+            test::set_caller::<DefaultEnvironment>(accounts.charlie);
+            assert_eq!(
+                contract.update_kyc_status(request_id, RequestStatus::Approved, 3, 30),
+                Ok(())
+            );
+
+            // Verification level gates hold; unknown users are unverified
+            assert!(contract.is_kyc_verified(accounts.bob, 3));
+            assert!(!contract.is_kyc_verified(accounts.bob, 4));
+            assert!(!contract.is_kyc_verified(accounts.eve, 1));
+
+            // An already-resolved request cannot be updated again
+            assert_eq!(
+                contract.update_kyc_status(request_id, RequestStatus::Rejected, 0, 0),
+                Err(Error::InvalidStatusTransition)
+            );
+        }
+
+        #[ink::test]
+        fn test_payment_flow_completes_by_provider() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            let payment_service = contract
+                .register_service(
+                    ServiceType::PaymentGateway,
+                    "Fiat Bridge".into(),
+                    accounts.charlie,
+                    "https://pay.example".into(),
+                    "v1".into(),
+                    50,
+                )
+                .unwrap();
+
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            let request_id = contract
+                .initiate_fiat_payment(
+                    payment_service,
+                    accounts.alice,
+                    1,
+                    1_000,
+                    "USD".into(),
+                    "invoice-42".into(),
+                )
+                .unwrap();
+
+            // A non-provider cannot complete the payment
+            test::set_caller::<DefaultEnvironment>(accounts.eve);
+            assert_eq!(
+                contract.complete_payment(request_id, true, 500),
+                Err(Error::Unauthorized)
+            );
+
+            // The provider completes it with the token equivalence recorded
+            test::set_caller::<DefaultEnvironment>(accounts.charlie);
+            assert_eq!(contract.complete_payment(request_id, true, 500), Ok(()));
+            let completed = contract.get_payment_request(request_id).unwrap();
+            assert_eq!(completed.status, RequestStatus::Approved);
+            assert_eq!(completed.equivalent_tokens, 500);
+        }
+    }
 }
