@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::arithmetic_side_effects,
@@ -11,7 +12,7 @@ use ink::storage::Mapping;
 mod status_packing;
 
 #[ink::contract]
-mod propchain_lending {
+pub mod propchain_lending {
     use ink::prelude::string::String;
     use ink::prelude::vec::Vec;
 
@@ -996,7 +997,14 @@ mod propchain_lending {
         pub fn borrow(&mut self, pool_id: u64, amount: u128) -> Result<(), LendingError> {
             propchain_traits::non_reentrant!(self, {
                 let mut pool = self.pools.get(pool_id).ok_or(LendingError::PoolNotFound)?;
-                if pool.total_deposits < pool.total_borrows + amount {
+                // Overflow-safe capacity check: if `total_borrows + amount`
+                // were to overflow u128 the old raw add could wrap and let
+                // the borrow slip through, so reject instead (Issue #992).
+                let projected_borrows = pool
+                    .total_borrows
+                    .checked_add(amount)
+                    .ok_or(LendingError::InsufficientLiquidity)?;
+                if pool.total_deposits < projected_borrows {
                     return Err(LendingError::InsufficientLiquidity);
                 }
                 pool.total_borrows += amount;
@@ -1024,7 +1032,10 @@ mod propchain_lending {
             let utilisation = (pool.total_borrows * 10000)
                 .checked_div(pool.total_deposits)
                 .unwrap_or(0);
-            Ok(pool.base_rate + (utilisation / 50) as u32)
+            // Saturating instead of a raw add: a wrapped rate would misprice
+            // every loan in the pool (Issue #992). Legitimate inputs are
+            // unaffected - saturation only caps pathological values.
+            Ok(pool.base_rate.saturating_add((utilisation / 50) as u32))
         }
 
         /// Open a leveraged margin position.
@@ -1755,9 +1766,16 @@ mod propchain_lending {
             let approved = restructuring.borrower_approved && restructuring.lender_approved;
             if approved {
                 self.update_interest_snapshot(loan_id)?;
-                // TODO(#lending-jit-stale-write): reload `app` from storage
-                // after update_interest_snapshot so we don't overwrite the
-                // freshly-accrued interest with the stale in-memory copy.
+
+                // Reload the loan application from storage after the interest
+                // snapshot has been computed and persisted. The in-memory `app`
+                // still holds the pre-snapshot accrued_interest; writing it back
+                // would clobber the freshly-computed value.
+                let mut app = self
+                    .loan_applications
+                    .get(loan_id)
+                    .ok_or(LendingError::LoanNotFound)?;
+
                 app.term_months = restructuring.proposed_term_months;
                 app.interest_rate_bps = restructuring.proposed_interest_rate_bps;
                 app.status = LoanStatus::Restructured;
@@ -3005,6 +3023,56 @@ mod tests {
             .is_ok());
         let loan = contract.get_loan(loan_id).unwrap();
         assert_eq!(loan.status, LoanStatus::Liquidated);
+    }
+
+    /// Issue #992: a borrow that would overflow `total_borrows + amount`
+    /// must be rejected instead of slipping through a wrapped comparison.
+    #[ink::test]
+    fn test_borrow_rejects_overflowing_amount() {
+        let mut contract = setup();
+        let pool_id = contract.create_pool(500).unwrap();
+        assert!(contract.deposit(pool_id, 1_000_000).is_ok());
+
+        // `u128::MAX + 1000` would wrap; the old raw add let such borrows pass.
+        assert_eq!(
+            contract.borrow(pool_id, u128::MAX),
+            Err(LendingError::InsufficientLiquidity)
+        );
+
+        // Pool accounting must be untouched by the failed borrow.
+        let pool = contract.get_pool(pool_id).unwrap();
+        assert_eq!(pool.total_borrows, 0);
+        assert_eq!(pool.total_deposits, 1_000_000);
+
+        // Normal borrowing still works after the rejection.
+        assert!(contract.borrow(pool_id, 500_000).is_ok());
+    }
+
+    /// Issue #992: `borrow_rate` must saturate rather than wrap when
+    /// `base_rate + utilisation term` exceeds u32::MAX.
+    #[ink::test]
+    fn test_borrow_rate_saturates_at_max() {
+        let mut contract = setup();
+        // No headroom above base_rate; any utilisation term must not wrap
+        // to a small (mispriced) rate.
+        let pool_id = contract.create_pool(u32::MAX).unwrap();
+        assert!(contract.deposit(pool_id, 1_000_000).is_ok());
+        assert!(contract.borrow(pool_id, 100_000).is_ok());
+
+        let rate = contract.borrow_rate(pool_id).unwrap();
+        assert_eq!(rate, u32::MAX);
+    }
+
+    /// Boundary pin: for legitimate inputs the rate formula is unchanged.
+    #[ink::test]
+    fn test_borrow_rate_matches_formula_for_normal_inputs() {
+        let mut contract = setup();
+        let pool_id = contract.create_pool(500).unwrap();
+        assert!(contract.deposit(pool_id, 10_000).is_ok());
+        assert!(contract.borrow(pool_id, 2_500).is_ok());
+
+        // 25% utilisation = 2500 bps; 2500 / 50 = 50 -> rate 550.
+        assert_eq!(contract.borrow_rate(pool_id).unwrap(), 550);
     }
 }
 

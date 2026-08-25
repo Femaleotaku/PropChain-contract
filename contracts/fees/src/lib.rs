@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 
@@ -16,7 +17,7 @@ use propchain_traits::{DynamicFeeProvider, FeeOperation};
 // every test after every include isn't worth the structural churn, so
 // suppress the lint here.
 #[allow(clippy::items_after_test_module)]
-mod propchain_fees {
+pub mod propchain_fees {
     use super::*;
 
     /// Basis points denominator (10000 = 100%)
@@ -325,6 +326,7 @@ mod propchain_fees {
                 min_bid,
                 current_bid: 0,
                 current_bidder: None,
+                escrowed_value: 0,
                 end_time: now.saturating_add(duration_seconds),
                 settled: false,
                 fee_paid: fee,
@@ -341,11 +343,18 @@ mod propchain_fees {
             Ok(auction_id)
         }
 
-        /// Place or increase bid (bid must be > current_bid and >= min_bid)
-        #[ink(message)]
+        /// Place or increase a bid on an active premium listing auction.
+        ///
+        /// The bid is **payable**: the caller must attach the full bid amount
+        /// as transferred value so the contract can hold it in custody until
+        /// settlement. Any overpayment above the bid amount is immediately
+        /// refunded, and the previous highest bidder is fully refunded their
+        /// escrowed amount before the new bid is recorded.
+        #[ink(message, payable)]
         pub fn place_bid(&mut self, auction_id: u64, amount: u128) -> Result<(), FeeError> {
             let caller = self.env().caller();
             let now = self.env().block_timestamp();
+            let attached = self.env().transferred_value();
             let mut auction = self
                 .auctions
                 .get(auction_id)
@@ -362,9 +371,37 @@ mod propchain_fees {
             if amount <= auction.current_bid {
                 return Err(FeeError::BidTooLow);
             }
+            // The attached value must cover the whole bid — it is held in
+            // custody by the contract until settlement.
+            if attached < amount {
+                return Err(FeeError::InsufficientValue);
+            }
+
+            // Refund the previous highest bidder before recording the new bid
+            // (checks-effects-interactions: state is updated below only after
+            // every fallible operation has succeeded).
+            let previous_escrow = auction.escrowed_value;
+            if let Some(previous_bidder) = auction.current_bidder {
+                if previous_escrow > 0
+                    && self
+                        .env()
+                        .transfer(previous_bidder, previous_escrow)
+                        .is_err()
+                {
+                    return Err(FeeError::TransferFailed);
+                }
+            }
+
+            // Refund any overpayment so exactly `amount` stays in custody.
+            let excess = attached - amount;
+            if excess > 0 && self.env().transfer(caller, excess).is_err() {
+                return Err(FeeError::TransferFailed);
+            }
+
             let outbid = auction.current_bid;
             auction.current_bid = amount;
             auction.current_bidder = Some(caller);
+            auction.escrowed_value = amount;
             self.auctions.insert(auction_id, &auction);
             self.auction_bids.insert(
                 (auction_id, caller),
@@ -383,7 +420,9 @@ mod propchain_fees {
             Ok(())
         }
 
-        /// Settle auction after end_time; winner is current_bidder
+        /// Settle auction after end_time; winner is current_bidder.
+        ///
+        /// The winning bid amount held in custody is paid out to the seller.
         #[ink(message)]
         pub fn settle_auction(&mut self, auction_id: u64) -> Result<(), FeeError> {
             let now = self.env().block_timestamp();
@@ -399,8 +438,15 @@ mod propchain_fees {
             }
             let winner = auction.current_bidder.ok_or(FeeError::AuctionNotFound)?;
             let amount = auction.current_bid;
+            // Take the escrowed bid out of custody before persisting so a
+            // re-entering caller can never observe (and double-claim) it.
+            let escrowed = auction.escrowed_value;
             auction.settled = true;
+            auction.escrowed_value = 0;
             self.auctions.insert(auction_id, &auction);
+            if escrowed > 0 && self.env().transfer(auction.seller, escrowed).is_err() {
+                return Err(FeeError::TransferFailed);
+            }
             // fee_paid was already added to fee_treasury at auction creation
             self.env().emit_event(PremiumAuctionSettled {
                 auction_id,
@@ -412,11 +458,16 @@ mod propchain_fees {
             Ok(())
         }
 
+        /// Returns the premium listing auction with the given id, if it exists.
         #[ink(message)]
         pub fn get_auction(&self, auction_id: u64) -> Option<PremiumAuction> {
             self.auctions.get(auction_id)
         }
 
+        /// Returns the total number of premium listing auctions created so far.
+        ///
+        /// Auction ids are assigned sequentially starting at 1, so this value is
+        /// also the highest allocated auction id.
         #[ink(message)]
         pub fn get_auction_count(&self) -> u64 {
             self.auction_count
@@ -424,6 +475,10 @@ mod propchain_fees {
 
         // ========== Incentives and distribution ==========
 
+        /// Registers `account` as a fee validator eligible for reward distribution.
+        ///
+        /// Caller requirement: admin only (`FeeError::Unauthorized` otherwise).
+        /// Idempotent: registering an already-active validator is a no-op.
         #[ink(message)]
         pub fn add_validator(&mut self, account: AccountId) -> Result<(), FeeError> {
             self.ensure_admin()?;
@@ -435,6 +490,11 @@ mod propchain_fees {
             Ok(())
         }
 
+        /// Removes `account` from the fee validator set.
+        ///
+        /// Caller requirement: admin only (`FeeError::Unauthorized` otherwise).
+        /// Removing an address that was never registered succeeds silently.
+        /// Any pending rewards for the removed validator remain claimable.
         #[ink(message)]
         pub fn remove_validator(&mut self, account: AccountId) -> Result<(), FeeError> {
             self.ensure_admin()?;
@@ -443,6 +503,12 @@ mod propchain_fees {
             Ok(())
         }
 
+        /// Sets how collected fees are split between validators and the treasury.
+        ///
+        /// Both shares are expressed in basis points (1 bps = 0.01%, denominator
+        /// 10_000). The two shares must not sum to more than 10_000 bps, otherwise
+        /// `FeeError::InvalidConfig` is returned and nothing changes.
+        /// Caller requirement: admin only (`FeeError::Unauthorized` otherwise).
         #[ink(message)]
         pub fn set_distribution_rates(
             &mut self,
@@ -524,6 +590,11 @@ mod propchain_fees {
             Ok(amount)
         }
 
+        /// Returns the reward amount currently claimable by `account`.
+        ///
+        /// Balances accrue via `distribute_fees` (validator share) and are
+        /// claimed with `claim_rewards`; accounts with no pending rewards
+        /// report 0.
         #[ink(message)]
         pub fn pending_reward(&self, account: AccountId) -> u128 {
             self.pending_rewards.get(account).unwrap_or(0)
@@ -614,16 +685,30 @@ mod propchain_fees {
             rec
         }
 
+        /// Returns the admin account configured at deployment.
+        ///
+        /// The admin is the sole caller allowed to change fee parameters,
+        /// validator membership, and distribution rates.
         #[ink(message)]
         pub fn admin(&self) -> AccountId {
             self.admin
         }
 
+        /// Returns the fixed `FeeConfig` (base/min/max fee in planck units)
+        /// captured at construction time.
+        ///
+        /// This is the immutable baseline; live parameters are reflected in
+        /// `get_fee_report` instead.
         #[ink(message)]
         pub fn default_config(&self) -> FeeConfig {
             self.default_config.clone()
         }
 
+        /// Returns the current unallocated treasury balance available for
+        /// distribution.
+        ///
+        /// Funds enter via `record_fee_collected` and leave when the admin
+        /// calls `distribute_fees`.
         #[ink(message)]
         pub fn fee_treasury(&self) -> u128 {
             self.fee_treasury
@@ -695,9 +780,20 @@ mod propchain_fees {
     }
 
     impl DynamicFeeProvider for FeeManager {
+        /// Recommended fee for `operation` under the dynamic fee model.
+        ///
+        /// Delegates to `calculate_fee`, which applies the configured base fee
+        /// (bps), congestion multiplier, and the operation's max-fee cap (bps,
+        /// denominator 10_000 in both cases). Read-only; any caller may query it.
         #[ink(message)]
         fn get_recommended_fee(&self, operation: FeeOperation) -> u128 {
             self.calculate_fee(operation)
         }
     }
+
+    // Unit-test module lives in `tests.rs` (mirrors the bridge contract's
+    // `include!("tests.rs")` pattern). Named `fee_tests` because the
+    // `include!("errors.rs")` above already contributes a sibling `mod tests`.
+    #[cfg(test)]
+    include!("tests.rs");
 }

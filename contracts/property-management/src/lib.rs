@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 
@@ -6,7 +7,7 @@ use ink::storage::Mapping;
 use propchain_traits::{non_reentrant, ComplianceChecker, ReentrancyError, ReentrancyGuard};
 
 #[ink::contract]
-mod property_management {
+pub mod property_management {
     use super::*;
 
     pub type TokenId = u64;
@@ -460,6 +461,7 @@ mod property_management {
 
     impl PropertyManagement {
         #[ink(constructor)]
+        #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             let caller = Self::env().caller();
             Self {
@@ -1675,7 +1677,106 @@ mod property_management {
             assert!(a.rent_collected >= 2000);
             assert!(a.maintenance_resolved >= 1);
         }
+
+        // ── Issue #991: rent exactness and dispute escrow coverage ────────
+
+        /// `pay_rent` must accept only the tenant paying exactly
+        /// `rent_per_period`: under- and over-payment are rejected, and a
+        /// non-tenant can never pay.
+        #[ink::test]
+        fn pay_rent_enforces_exact_amount_and_tenant_gate() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            let mut pm = setup();
+            let lease_id = pm
+                .create_lease(1, accounts.bob, accounts.alice, 1000, 86_400, 500, 0, 0)
+                .expect("lease");
+
+            // Non-tenant (charlie) is rejected even with the exact amount.
+            test::set_caller::<DefaultEnvironment>(accounts.charlie);
+            test::set_value_transferred::<DefaultEnvironment>(1000);
+            assert_eq!(pm.pay_rent(lease_id), Err(Error::NotTenant));
+
+            // Tenant underpayment rejected.
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            test::set_value_transferred::<DefaultEnvironment>(999);
+            assert_eq!(pm.pay_rent(lease_id), Err(Error::InvalidAmount));
+
+            // Tenant overpayment rejected.
+            test::set_value_transferred::<DefaultEnvironment>(1001);
+            assert_eq!(pm.pay_rent(lease_id), Err(Error::InvalidAmount));
+
+            // Rejected attempts collected nothing.
+            assert_eq!(pm.get_management_dashboard().total_rent_collected, 0);
+
+            // Exact amount from the tenant succeeds and advances the schedule.
+            test::set_value_transferred::<DefaultEnvironment>(1000);
+            pm.pay_rent(lease_id).expect("exact rent");
+            let lease = pm.get_lease(lease_id).expect("lease exists");
+            assert_eq!(lease.next_due, 86_400);
+            assert_eq!(pm.get_management_dashboard().total_rent_collected, 1000);
+
+            // Rent on an ended lease is rejected.
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            pm.end_lease(lease_id).expect("end");
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            test::set_value_transferred::<DefaultEnvironment>(1000);
+            assert_eq!(pm.pay_rent(lease_id), Err(Error::LeaseNotActive));
+        }
+
+        /// Dispute staking locks escrow at each step and releases it exactly
+        /// once on resolution; mismatched respondents/amounts are rejected.
+        #[ink::test]
+        fn dispute_staking_locks_and_releases_escrow() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            let mut pm = setup();
+            assert_eq!(pm.dispute_escrow_locked_balance(), 0);
+
+            // Initiator opens with a 100 stake.
+            test::set_value_transferred::<DefaultEnvironment>(100);
+            let did = pm
+                .open_dispute(1, accounts.bob, Hash::from([5u8; 32]))
+                .expect("open");
+            assert_eq!(pm.dispute_escrow_locked_balance(), 100);
+
+            // A non-respondent cannot stake.
+            test::set_caller::<DefaultEnvironment>(accounts.charlie);
+            test::set_value_transferred::<DefaultEnvironment>(100);
+            assert_eq!(
+                pm.counterparty_stake_dispute(did),
+                Err(Error::RespondentMismatch)
+            );
+
+            // The respondent must match the initiator's stake exactly.
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            test::set_value_transferred::<DefaultEnvironment>(99);
+            assert_eq!(
+                pm.counterparty_stake_dispute(did),
+                Err(Error::InvalidAmount)
+            );
+            // Failed stake attempts did not change escrow.
+            assert_eq!(pm.dispute_escrow_locked_balance(), 100);
+
+            // Matching stake completes the dispute as Open.
+            test::set_value_transferred::<DefaultEnvironment>(100);
+            pm.counterparty_stake_dispute(did).expect("counter");
+            assert_eq!(pm.dispute_escrow_locked_balance(), 200);
+            assert_eq!(pm.get_dispute(did).expect("d").status, DisputeStatus::Open);
+
+            // Resolution releases the whole escrow.
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            pm.resolve_dispute(did, Some(false)).expect("resolve");
+            assert_eq!(pm.dispute_escrow_locked_balance(), 0);
+            assert_eq!(
+                pm.get_dispute(did).expect("d").status,
+                DisputeStatus::ResolvedRespondent
+            );
+        }
     }
 }
 
-pub mod submodules;
+
+pub mod permit_module {
+    include!("permit.rs");
+}

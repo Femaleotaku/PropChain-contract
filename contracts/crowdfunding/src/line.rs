@@ -146,6 +146,8 @@ mod propchain_crowdfunding {
         pub raised_amount: u128,
         pub status: CampaignStatus,
         pub investor_count: u32,
+        /// Block number when the campaign was created.
+        pub created_at: u64,
     }
 
     #[derive(
@@ -313,6 +315,8 @@ mod propchain_crowdfunding {
         authorized_oracles: Mapping<AccountId, bool>,
         /// Tracks whether an investor has been refunded for a campaign
         refunds_issued: Mapping<(u64, AccountId), bool>,
+        /// List of investors per campaign, used to compute metrics like largest investment
+        campaign_investors: Mapping<u64, Vec<AccountId>>,
     }
 
     // ── Events ───────────────────────────────────────────────
@@ -420,6 +424,7 @@ mod propchain_crowdfunding {
                 reentrancy_guard: propchain_traits::ReentrancyGuard::new(),
                 authorized_oracles: Mapping::default(),
                 refunds_issued: Mapping::default(),
+                campaign_investors: Mapping::default(),
             }
         }
 
@@ -440,6 +445,7 @@ mod propchain_crowdfunding {
                 raised_amount: 0,
                 status: CampaignStatus::Draft,
                 investor_count: 0,
+                created_at: self.env().block_timestamp(),
             };
             self.campaigns.insert(self.campaign_count, &campaign);
             self.campaign_ids.push(self.campaign_count);
@@ -539,6 +545,10 @@ mod propchain_crowdfunding {
             let current = self.investments.get((campaign_id, caller)).unwrap_or(0);
             if current == 0 {
                 campaign.investor_count += 1;
+                // Track this investor for metrics computation
+                let mut investors = self.campaign_investors.get(campaign_id).unwrap_or_default();
+                investors.push(caller);
+                self.campaign_investors.insert(campaign_id, &investors);
             }
             self.investments
                 .insert((campaign_id, caller), &(current + amount));
@@ -751,6 +761,7 @@ mod propchain_crowdfunding {
                 raised_amount: 1,
                 status: CampaignStatus::Draft,
                 investor_count: 0,
+                created_at: 0,
             });
             let investment = self.investments.get((campaign_id, investor)).unwrap_or(0);
             if campaign.target_amount == 0 {
@@ -1212,21 +1223,15 @@ mod propchain_crowdfunding {
                 total_investment / total_investors as u128
             };
 
-            // Find largest investment
+            // Find largest investment by scanning the investment mapping for
+            // this campaign. Each entry is keyed by (campaign_id, investor).
             let mut largest_investment = 0u128;
-            for id in self.campaign_ids.iter() {
-                if let Some(investor) = self.campaigns.get(*id) {
-                    if investor.campaign_id == campaign_id {
-                        // This is inefficient, but we need to iterate through all investments
-                        // In a real implementation, we'd store this data
-                        break;
-                    }
+            for investor_id in self.campaign_investors.get(campaign_id).unwrap_or_default() {
+                let amount = self.investments.get((campaign_id, investor_id)).unwrap_or(0);
+                if amount > largest_investment {
+                    largest_investment = amount;
                 }
             }
-
-            // For now, we'll approximate largest investment
-            // TODO: Store max investment per campaign
-            largest_investment = average_investment * 2; // Placeholder
 
             let total_milestones = self.campaign_milestone_counts.get(campaign_id).unwrap_or(0);
             let released_milestones = self.released_milestone_counts.get(campaign_id).unwrap_or(0);
@@ -1236,14 +1241,19 @@ mod propchain_crowdfunding {
                 ((released_milestones as u32 * 10_000) / total_milestones) as u32
             };
 
-            // Placeholder values for time-based metrics
-            // In a real implementation, we'd track timestamps
-            let days_active = 30; // Placeholder
-            let funding_velocity = if days_active == 0 {
-                0
+            // Compute days_active from the stored campaign creation timestamp.
+            // For campaigns created before this field existed (created_at == 0),
+            // fall back to 1 day to avoid division by zero.
+            let current_block = self.env().block_timestamp();
+            let days_active = if campaign.created_at > 0 && current_block > campaign.created_at {
+                let elapsed_blocks = current_block.saturating_sub(campaign.created_at);
+                let elapsed_seconds = elapsed_blocks.saturating_mul(6);
+                let days = elapsed_seconds / 86_400;
+                if days == 0 { 1 } else { days }
             } else {
-                total_investment / days_active as u128
+                1
             };
+            let funding_velocity = total_investment / days_active as u128;
 
             let investor_retention_rate = 8_000; // 80% placeholder
             let risk_score = self
@@ -1272,7 +1282,7 @@ mod propchain_crowdfunding {
                 average_investment,
                 largest_investment,
                 milestone_completion_rate,
-                days_active,
+                days_active: days_active as u32,
                 funding_velocity,
                 investor_retention_rate,
                 risk_score,

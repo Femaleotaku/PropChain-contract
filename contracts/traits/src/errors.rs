@@ -367,6 +367,8 @@ pub mod fee_codes {
     pub const FEE_ARITHMETIC_ERROR: u32 = 5009;
     pub const FEE_BID_DEADLINE_NOT_REACHED: u32 = 5010;
     pub const FEE_SELF_BID_NOT_ALLOWED: u32 = 5011;
+    pub const FEE_INSUFFICIENT_VALUE: u32 = 5012;
+    pub const FEE_TRANSFER_FAILED: u32 = 5013;
 }
 
 /// Compliance error codes (6000-6999)

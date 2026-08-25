@@ -45,36 +45,54 @@ jobs:
           echo "---" >> AUDIT_LOG.md
 
       - name: Execute Cargo Deny Checks
+        id: deny
         run: |
           echo "## 📦 Dependency License & Advisory Checks (cargo-deny)" >> AUDIT_LOG.md
           echo "\`\`\`text" >> AUDIT_LOG.md
-          cargo deny check licenses bans sources 2>&1 >> AUDIT_LOG.md || echo "cargo-deny failed or flagged warnings" >> AUDIT_LOG.md
+          if cargo deny check licenses bans sources 2>&1 | tee -a AUDIT_LOG.md; then
+            echo "deny_exit=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "deny_exit=$?" >> "$GITHUB_OUTPUT"
+            echo "::warning::cargo-deny flagged warnings or errors (see AUDIT_LOG.md)"
+          fi
           echo "\`\`\`" >> AUDIT_LOG.md
           echo "---" >> AUDIT_LOG.md
 
       - name: Execute Cargo Audit Sweeps
+        id: audit
         run: |
           echo "## 🔍 Vulnerability Advisory Scans (cargo-audit)" >> AUDIT_LOG.md
           echo "\`\`\`text" >> AUDIT_LOG.md
-          cargo audit 2>&1 >> AUDIT_LOG.md || echo "cargo-audit detected critical vulnerability markers" >> AUDIT_LOG.md
+          set +e
+          cargo audit 2>&1 | tee -a AUDIT_LOG.md
+          AUDIT_EXIT=$?
+          set -e
           echo "\`\`\`" >> AUDIT_LOG.md
           echo "---" >> AUDIT_LOG.md
+          if [ "$AUDIT_EXIT" -ne 0 ]; then
+            echo "::error::cargo-audit found vulnerabilities (exit code $AUDIT_EXIT). See AUDIT_LOG.md for details."
+            echo "audit_exit=$AUDIT_EXIT" >> "$GITHUB_OUTPUT"
+          else
+            echo "audit_exit=0" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Mutants Gate — lending
+      - name: Mutants Gate — propchain-lending
         run: |
           set -o pipefail
           echo "## 🧬 Mutation Gate: lending" >> AUDIT_LOG.md
           echo "\`\`\`text" >> AUDIT_LOG.md
-          cargo mutants -p lending --timeout 120 2>&1 | tee -a AUDIT_LOG.md
+          cargo mutants -p propchain-lending --timeout 120 2>&1 | tee -a AUDIT_LOG.md
           echo "\`\`\`" >> AUDIT_LOG.md
+          echo "---" >> AUDIT_LOG.md
 
-      - name: Mutants Gate — bridge
+      - name: Mutants Gate — propchain-bridge
         run: |
           set -o pipefail
           echo "## 🧬 Mutation Gate: bridge" >> AUDIT_LOG.md
           echo "\`\`\`text" >> AUDIT_LOG.md
-          cargo mutants -p bridge --timeout 180 2>&1 | tee -a AUDIT_LOG.md
+          cargo mutants -p propchain-bridge --timeout 180 2>&1 | tee -a AUDIT_LOG.md
           echo "\`\`\`" >> AUDIT_LOG.md
+          echo "---" >> AUDIT_LOG.md
 
       - name: Mutants Gate — oracle
         run: |
@@ -83,6 +101,17 @@ jobs:
           echo "\`\`\`text" >> AUDIT_LOG.md
           cargo mutants -p oracle --timeout 120 2>&1 | tee -a AUDIT_LOG.md
           echo "\`\`\`" >> AUDIT_LOG.md
+          echo "---" >> AUDIT_LOG.md
+
+      - name: Evaluate Audit Results
+        if: always()
+        run: |
+          DENY_EXIT="${{ steps.deny.outputs.deny_exit }}"
+          AUDIT_EXIT="${{ steps.audit.outputs.audit_exit }}"
+          if [ "$DENY_EXIT" != "0" ] || [ "$AUDIT_EXIT" != "0" ]; then
+            echo "::error::Security audit found issues. Review AUDIT_LOG.md and fix before proceeding."
+            exit 1
+          fi
 
       - name: Commit and Push Security Results to Repo
         if: always()
@@ -90,5 +119,5 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add AUDIT_LOG.md
-          git diff-index --quiet HEAD || git commit -m "chore(ci): update nightly AUDIT_LOG.md validation tracking profiles [skip ci]"
+          git diff-index --quiet HEAD || git commit -m "chore(ci): update nightly AUDIT_LOG.md [skip ci]"
           git push origin HEAD:${{ github.ref }}

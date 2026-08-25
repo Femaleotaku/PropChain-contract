@@ -764,4 +764,342 @@ mod tests {
         let actual_output = result.expect("swap succeeds");
         assert!(actual_output >= min_output, "Output should meet minimum");
     }
+
+    // =========================================================================
+    // Trading competitions / cross-chain trades / liquidity mining (Issue #997)
+    // =========================================================================
+
+    #[ink::test]
+    fn trading_competition_scores_swaps_and_pays_proportional_rewards() {
+        let mut dex = setup_dex();
+        let pair_id = create_pool(&mut dex);
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+
+        test::set_block_number::<DefaultEnvironment>(100);
+
+        // Admin creates a competition on pair 1 running blocks 100..110.
+        let competition_id = dex
+            .create_trading_competition(
+                Some(pair_id),
+                String::from("Weekly Volume Race"),
+                10_000,
+                100,
+                110,
+                1,
+                10,
+                String::from("PCG"),
+            )
+            .expect("competition creation should work");
+
+        let competition = dex.get_trading_competition(competition_id).unwrap();
+        assert!(competition.active);
+        assert_eq!(
+            dex.get_active_competitions().len(),
+            1,
+            "competition must be listed as active inside its window"
+        );
+
+        // Claiming before the competition ends is rejected even with score.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(
+            dex.claim_competition_reward(competition_id),
+            Err(Error::InvalidRequest)
+        );
+
+        // Bob and Charlie trade inside the window; their quote output is the
+        // scored volume.
+        let _ = dex.swap_exact_base_for_quote(pair_id, 1_000, 1).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        let _ = dex.swap_exact_base_for_quote(pair_id, 2_000, 1).unwrap();
+
+        let bob_score = dex.get_competition_score(competition_id, accounts.bob);
+        let charlie_score = dex.get_competition_score(competition_id, accounts.charlie);
+        assert!(bob_score > 0, "bob must accrue score from his swap");
+        assert!(charlie_score > bob_score, "larger trade -> larger score");
+
+        assert_eq!(
+            dex.list_competition_participants(competition_id),
+            vec![accounts.bob, accounts.charlie]
+        );
+        let leaderboard = dex.get_competition_leaderboard(competition_id);
+        assert_eq!(leaderboard.len(), 2);
+        assert!(leaderboard.contains(&(accounts.bob, bob_score)));
+        assert!(leaderboard.contains(&(accounts.charlie, charlie_score)));
+
+        // After the window closes rewards can be claimed pro rata.
+        test::set_block_number::<DefaultEnvironment>(111);
+        let expected = 10_000u128 * bob_score / (bob_score + charlie_score);
+        assert!(expected > 0);
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let balance_before = dex.get_governance_balance(accounts.bob);
+        let reward = dex.claim_competition_reward(competition_id).unwrap();
+        assert_eq!(reward, expected);
+        assert_eq!(
+            dex.get_governance_balance(accounts.bob),
+            balance_before + reward
+        );
+
+        // Double claims are rejected...
+        assert_eq!(
+            dex.claim_competition_reward(competition_id),
+            Err(Error::InvalidRequest)
+        );
+
+        // ...as are claims from accounts that never traded.
+        test::set_caller::<DefaultEnvironment>(accounts.django);
+        assert_eq!(
+            dex.claim_competition_reward(competition_id),
+            Err(Error::InvalidRequest)
+        );
+    }
+
+    #[ink::test]
+    fn trading_competition_admin_controls_and_validation() {
+        let mut dex = setup_dex();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+
+        test::set_block_number::<DefaultEnvironment>(100);
+
+        // Only the admin may create competitions.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(
+            dex.create_trading_competition(
+                None,
+                String::from("Bob's Race"),
+                5_000,
+                100,
+                110,
+                1,
+                10,
+                String::from("PCG")
+            ),
+            Err(Error::Unauthorized)
+        );
+
+        // Validation of title, window and reward amount.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            dex.create_trading_competition(
+                None,
+                String::new(),
+                5_000,
+                100,
+                110,
+                1,
+                10,
+                String::from("PCG")
+            ),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(
+            dex.create_trading_competition(
+                None,
+                String::from("Backwards"),
+                5_000,
+                110,
+                100,
+                1,
+                10,
+                String::from("PCG")
+            ),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(
+            dex.create_trading_competition(
+                None,
+                String::from("No Reward"),
+                0,
+                100,
+                110,
+                1,
+                10,
+                String::from("PCG")
+            ),
+            Err(Error::InvalidRequest)
+        );
+
+        let competition_id = dex
+            .create_trading_competition(
+                None,
+                String::from("Open Race"),
+                5_000,
+                100,
+                110,
+                1,
+                10,
+                String::from("PCG"),
+            )
+            .unwrap();
+
+        // Deactivation stops score accrual immediately...
+        dex.deactivate_competition(competition_id).unwrap();
+        assert!(!dex.get_trading_competition(competition_id).unwrap().active);
+        assert!(dex.get_active_competitions().is_empty());
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let other_pool = create_pool(&mut dex);
+        let _ = dex.swap_exact_base_for_quote(other_pool, 1_000, 1);
+        assert_eq!(
+            dex.get_competition_score(competition_id, accounts.bob),
+            0,
+            "inactive competitions must not accrue score"
+        );
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        // ...and re-activation restores it.
+        dex.activate_competition(competition_id).unwrap();
+        assert!(dex.get_trading_competition(competition_id).unwrap().active);
+
+        // Authorization and unknown ids on both toggles.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(
+            dex.deactivate_competition(competition_id),
+            Err(Error::Unauthorized)
+        );
+        assert_eq!(
+            dex.activate_competition(999),
+            Err(Error::Unauthorized)
+        );
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            dex.deactivate_competition(999),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(
+            dex.activate_competition(999),
+            Err(Error::InvalidRequest)
+        );
+    }
+
+    #[ink::test]
+    fn cross_chain_trade_lifecycle_create_attach_finalize() {
+        let mut dex = setup_dex();
+        let pair_id = create_pool(&mut dex);
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+
+        // Bob opens an intent to move value to chain 2.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let trade_id = dex
+            .create_cross_chain_trade(
+                pair_id,
+                None,
+                2,
+                accounts.charlie,
+                500,
+                1,
+            )
+            .expect("cross-chain trade creation should work");
+        assert_eq!(
+            dex.get_portfolio_snapshot(accounts.bob)
+                .cross_chain_positions,
+            1,
+            "a pending intent counts as an open cross-chain position"
+        );
+
+        // Only the trader or admin may attach a bridge request.
+        test::set_caller::<DefaultEnvironment>(accounts.django);
+        assert_eq!(
+            dex.attach_bridge_request(trade_id, 7),
+            Err(Error::Unauthorized)
+        );
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        dex.attach_bridge_request(trade_id, 7).unwrap();
+        assert_eq!(
+            dex.get_portfolio_snapshot(accounts.bob)
+                .cross_chain_positions,
+            1,
+            "bridge-requested trades are still open positions"
+        );
+
+        // Finalization is admin-only...
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(
+            dex.finalize_cross_chain_trade(trade_id),
+            Err(Error::Unauthorized)
+        );
+
+        // ...and settles the position.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        dex.finalize_cross_chain_trade(trade_id).unwrap();
+        assert_eq!(
+            dex.get_portfolio_snapshot(accounts.bob)
+                .cross_chain_positions,
+            0,
+            "settled intents no longer count as open positions"
+        );
+    }
+
+    #[ink::test]
+    fn cross_chain_trade_rejects_unknown_pair_and_unconfigured_route() {
+        let mut dex = setup_dex();
+        let pair_id = create_pool(&mut dex);
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+
+        // Unknown pool id.
+        assert_eq!(
+            dex.create_cross_chain_trade(999, None, 2, accounts.charlie, 500, 1),
+            Err(Error::PoolNotFound)
+        );
+
+        // Chain 3 has no configured bridge route/fee quote.
+        assert_eq!(
+            dex.quote_cross_chain_trade(3),
+            Err(Error::InvalidBridgeRoute)
+        );
+        assert_eq!(
+            dex.create_cross_chain_trade(pair_id, None, 3, accounts.charlie, 500, 1),
+            Err(Error::InvalidBridgeRoute)
+        );
+
+        // Attaching or finalizing unknown trade ids fails cleanly.
+        assert_eq!(
+            dex.attach_bridge_request(42, 1),
+            Err(Error::CrossChainTradeNotFound)
+        );
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            dex.finalize_cross_chain_trade(42),
+            Err(Error::CrossChainTradeNotFound)
+        );
+    }
+
+    #[ink::test]
+    fn liquidity_mining_campaign_is_admin_only_and_validated() {
+        let mut dex = setup_dex();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+
+        // Non-admins cannot configure campaigns.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(
+            dex.set_liquidity_mining_campaign(50, 10, 20, String::from("PCG")),
+            Err(Error::Unauthorized)
+        );
+
+        // Validation of emission rate, window and token symbol.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            dex.set_liquidity_mining_campaign(0, 10, 20, String::from("PCG")),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(
+            dex.set_liquidity_mining_campaign(50, 20, 20, String::from("PCG")),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(
+            dex.set_liquidity_mining_campaign(50, 10, 20, String::new()),
+            Err(Error::InvalidRequest)
+        );
+
+        // A valid campaign is stored and readable.
+        dex.set_liquidity_mining_campaign(50, 10, 20, String::from("PCG"))
+            .expect("valid campaign config should work");
+        let campaign = dex.get_liquidity_mining_campaign();
+        assert_eq!(campaign.emission_rate, 50);
+        assert_eq!(campaign.start_block, 10);
+        assert_eq!(campaign.end_block, 20);
+        assert_eq!(campaign.reward_token_symbol, String::from("PCG"));
+    }
 }

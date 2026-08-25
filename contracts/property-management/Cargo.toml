@@ -26,3 +26,6 @@ std = [
     "scale-info/std",
     "propchain-traits/std",
 ]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+secp256k1 = { version = "0.28.2", features = ["recovery"] }
