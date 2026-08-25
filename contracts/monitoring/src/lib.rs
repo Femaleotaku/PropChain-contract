@@ -1,4 +1,13 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
+
+/// Standalone quorum-guard helper tracking governance participation drops
+/// across consecutive proposals.
+///
+/// The module is compiled and exported as part of this crate so its logic is
+/// unit-tested and reusable by integrators; automatic recording hooks into
+/// governance events are out of scope for this crate.
+pub mod quorum_guard;
 
 #[ink::contract]
 mod monitoring {

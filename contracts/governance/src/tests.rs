@@ -469,5 +469,175 @@ mod tests {
             Err(Error::NotASigner)
         );
     }
+
+    /// Brute-force recount helper mirroring the pre-#972 scan semantics:
+    /// tallies each proposal by its *final* status and computes the
+    /// participation average over Executed/Rejected proposals.
+    fn brute_force_recount(gov: &Governance) -> GovernanceAnalytics {
+        let signer_count = gov.get_signers().len() as u64;
+        let mut executed = 0u64;
+        let mut rejected = 0u64;
+        let mut cancelled = 0u64;
+        let mut active = 0u64;
+        let mut participation_sum = 0u64;
+        let mut closed = 0u64;
+
+        for id in 0..gov.proposal_counter {
+            if let Some(p) = gov.proposals.get(id) {
+                match p.status {
+                    ProposalStatus::Active | ProposalStatus::Approved => active += 1,
+                    ProposalStatus::Executed => {
+                        executed += 1;
+                        closed += 1;
+                        if signer_count > 0 {
+                            participation_sum +=
+                                (p.votes_for.saturating_add(p.votes_against) as u64)
+                                    .saturating_mul(10_000)
+                                    / signer_count;
+                        }
+                    }
+                    ProposalStatus::Rejected => {
+                        rejected += 1;
+                        closed += 1;
+                        if signer_count > 0 {
+                            participation_sum +=
+                                (p.votes_for.saturating_add(p.votes_against) as u64)
+                                    .saturating_mul(10_000)
+                                    / signer_count;
+                        }
+                    }
+                    ProposalStatus::Cancelled => cancelled += 1,
+                    ProposalStatus::Expired => {}
+                }
+            }
+        }
+
+        GovernanceAnalytics {
+            total_proposals: gov.proposal_counter,
+            executed_proposals: executed,
+            rejected_proposals: rejected,
+            cancelled_proposals: cancelled,
+            active_proposals: active,
+            avg_participation_bps: if closed > 0 {
+                (participation_sum / closed) as u32
+            } else {
+                0
+            },
+        }
+    }
+
+    fn assert_analytics_match_recount(gov: &Governance) {
+        let fast = gov.get_analytics();
+        let brute = brute_force_recount(gov);
+        assert_eq!(fast.total_proposals, brute.total_proposals);
+        assert_eq!(fast.executed_proposals, brute.executed_proposals);
+        assert_eq!(fast.rejected_proposals, brute.rejected_proposals);
+        assert_eq!(fast.cancelled_proposals, brute.cancelled_proposals);
+        assert_eq!(fast.active_proposals, brute.active_proposals);
+        assert_eq!(fast.avg_participation_bps, brute.avg_participation_bps);
+    }
+
+    /// Incremental counters must match a brute-force recount across every
+    /// status transition path (vote, execute, cancel, emergency override).
+    #[ink::test]
+    fn analytics_counters_match_brute_force_recount_across_transitions() {
+        let accounts = default_accounts();
+        let mut gov = create_governance();
+
+        // p0: approved by 2/3 votes, then executed after timelock.
+        let p0 = gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None).unwrap();
+        set_caller(accounts.alice);
+        gov.vote(p0, true).unwrap();
+        set_caller(accounts.bob);
+        gov.vote(p0, true).unwrap(); // reaches Approved
+        assert_analytics_match_recount(&mut gov);
+        advance_block(11);
+        set_caller(accounts.alice); // signer executes after timelock
+        gov.execute_proposal(p0).unwrap();
+
+        // p1: voted down (certain rejection).
+        let p1 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        set_caller(accounts.alice);
+        gov.vote(p1, false).unwrap();
+        set_caller(accounts.bob);
+        gov.vote(p1, false).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // p2: cancelled by proposer while still active.
+        let p2 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        gov.cancel_proposal(p2).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // p3: emergency-rejected straight from Active.
+        let p3 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        set_caller(accounts.alice); // admin-only
+        gov.emergency_override(p3, false).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // p4: emergency-executed from Active.
+        let p4 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        gov.emergency_override(p4, true).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // p5: approved but never executed (stays in Approved/timelock state).
+        let p5 = gov.create_proposal(dummy_hash(), GovernanceAction::SaleApproval, None).unwrap();
+        set_caller(accounts.alice);
+        gov.vote(p5, true).unwrap();
+        set_caller(accounts.bob);
+        gov.vote(p5, true).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // Tricky case: emergency-execute an already-rejected proposal.
+        // The recount reads final statuses, so p1 moves rejected -> executed.
+        set_caller(accounts.alice); // admin-only
+        gov.emergency_override(p1, true).unwrap();
+        assert_analytics_match_recount(&mut gov);
+
+        // Final sanity snapshot.
+        let stats = gov.get_analytics();
+        assert_eq!(stats.total_proposals, 6);
+        assert_eq!(stats.executed_proposals, 3); // p0, p1 (override), p4
+        assert_eq!(stats.rejected_proposals, 1); // p3
+        assert_eq!(stats.cancelled_proposals, 1); // p2
+        assert_eq!(stats.active_proposals, 1); // p5 still in Approved
+
+        // p1 contributed its participation exactly once (when it was
+        // rejected), so re-closing it via override must not skew the average.
+        // Closures: p0 (6666 bps), p1 (6666 bps), p3 (0), p4 (0) -> avg 3333.
+        let expected_avg = ((2 * 10_000 / 3) + (2 * 10_000 / 3) + 0 + 0) / 4;
+        assert_eq!(stats.avg_participation_bps, expected_avg);
+    }
+
+    /// A proposal-heavy history (>1000 proposals) must not degrade or corrupt
+    /// analytics: counters are maintained incrementally per transition.
+    #[ink::test]
+    fn analytics_stays_consistent_over_thousand_proposal_history() {
+        let accounts = default_accounts();
+        let mut gov = create_governance();
+
+        // GOVERNANCE_MAX_ACTIVE_PROPOSALS caps concurrent active proposals,
+        // so create batches of 100 and cancel them to free room again.
+        let batch = 100usize;
+        let rounds = 11;
+        for round in 0..rounds {
+            for _ in 0..batch {
+                let id = gov.create_proposal(dummy_hash(), GovernanceAction::ModifyProperty, None).unwrap();
+                assert_eq!(id as usize, round * batch + (id as usize % batch));
+            }
+            for id in (round * batch) as u64..((round + 1) * batch) as u64 {
+                gov.cancel_proposal(id).unwrap();
+            }
+        }
+
+        let stats = gov.get_analytics();
+        assert_eq!(stats.total_proposals, (batch * rounds) as u64);
+        assert_eq!(stats.cancelled_proposals, (batch * rounds) as u64);
+        assert_eq!(stats.active_proposals, 0);
+        assert_eq!(stats.executed_proposals, 0);
+        assert_eq!(stats.rejected_proposals, 0);
+        assert_eq!(stats.avg_participation_bps, 0);
+
+        assert_analytics_match_recount(&mut gov);
+    }
 }
 
