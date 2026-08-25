@@ -17,7 +17,7 @@ use ink::prelude::vec::Vec;
 use ink::storage::Mapping;
 
 #[ink::contract]
-mod propchain_third_party {
+pub mod propchain_third_party {
     use super::*;
 
     // Data types extracted to types.rs (Issue #101)

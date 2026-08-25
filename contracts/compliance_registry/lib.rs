@@ -9,7 +9,7 @@
 use propchain_traits::{ComplianceChecker, *};
 
 #[ink::contract]
-mod compliance_registry {
+pub mod compliance_registry {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use propchain_traits::ComplianceOperation;

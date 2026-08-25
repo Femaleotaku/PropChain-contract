@@ -18,3 +18,10 @@ pub mod security_audit_runner;
 // ─── Regression Test Suite ───────────────────────────────────────────
 /// Issue #487: Regression test suite for all previously fixed bugs
 pub mod regression;
+
+// ─── Cross-Contract Integration Suites ───────────────────────────────
+/// Issue #1013: Third-party registry integration coverage
+pub mod integration_third_party;
+
+/// Issue #1014: Compliance registry integration coverage
+pub mod integration_compliance;

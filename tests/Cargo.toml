@@ -32,6 +32,7 @@ staking = { path = "../contracts/staking", default-features = false }
 propchain-bridge = { path = "../contracts/bridge", default-features = false }
 oracle = { path = "../contracts/oracle", default-features = false }
 propchain-insurance = { path = "../contracts/insurance", default-features = false }
+propchain-third-party = { path = "../contracts/third-party", default-features = false }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"], optional = true }
@@ -62,6 +63,7 @@ std = [
     "staking/std",
     "propchain-bridge/std",
     "propchain-insurance/std",
+    "propchain-third-party/std",
     "serde/std",
     "serde_json/std",
     "tokio",
