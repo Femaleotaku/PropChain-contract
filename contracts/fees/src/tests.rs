@@ -8,6 +8,23 @@
 mod fee_tests {
     use super::*;
 
+    type DefaultEnvironment = ink::env::DefaultEnvironment;
+
+    fn default_accounts()
+    -> ink::env::test::DefaultAccounts<DefaultEnvironment> {
+        ink::env::test::default_accounts::<DefaultEnvironment>()
+    }
+
+    /// Fund an account with native balance so it can bid and receive refunds.
+    fn fund(account: &AccountId, amount: u128) {
+        ink::env::test::set_account_balance::<DefaultEnvironment>(*account, amount);
+    }
+
+    fn balance(account: &AccountId) -> u128 {
+        ink::env::test::get_account_balance::<DefaultEnvironment>(*account)
+            .expect("account must have a balance")
+    }
+
     #[ink::test]
     fn test_dynamic_fee_calculation() {
         let contract = FeeManager::new(1000, 100, 100_000);
@@ -17,6 +34,7 @@ mod fee_tests {
 
     #[ink::test]
     fn test_premium_auction_flow() {
+        let accounts = default_accounts();
         let mut contract = FeeManager::new(100, 10, 10_000);
         let auction_id = contract
             .create_premium_auction(1, 500, 3600)
@@ -27,9 +45,115 @@ mod fee_tests {
         assert_eq!(auction.min_bid, 500);
         assert!(!auction.settled);
 
+        ink::env::test::set_caller::<DefaultEnvironment>(accounts.bob);
+        ink::env::test::set_value_transferred::<DefaultEnvironment>(600);
         assert!(contract.place_bid(auction_id, 600).is_ok());
         let auction = contract.get_auction(auction_id).unwrap();
         assert_eq!(auction.current_bid, 600);
+        assert_eq!(auction.current_bidder, Some(accounts.bob));
+        assert_eq!(auction.escrowed_value, 600);
+    }
+
+    /// The off-chain engine enforces an existential deposit of 1e6, so all
+    /// seeded balances must stay comfortably above it even after debits.
+    const START_BALANCE: u128 = 1_000_000_000;
+
+    /// Bids without attaching enough value must be rejected.
+    #[ink::test]
+    fn place_bid_requires_attached_value() {
+        let mut contract = FeeManager::new(100, 10, 10_000);
+        let auction_id = contract.create_premium_auction(1, 500, 3600).expect("create");
+        assert_eq!(
+            contract.place_bid(auction_id, 600),
+            Err(FeeError::InsufficientValue)
+        );
+    }
+
+    /// The previous highest bidder must be fully refunded when outbid.
+    #[ink::test]
+    fn outbid_refunds_previous_bidder_escrow() {
+        let accounts = default_accounts();
+        fund(&accounts.alice, START_BALANCE);
+        fund(&accounts.bob, START_BALANCE);
+        fund(&accounts.charlie, START_BALANCE);
+
+        let mut contract = FeeManager::new(100, 10, 10_000);
+        let auction_id = contract.create_premium_auction(1, 500, 3600).expect("create");
+
+        ink::env::test::set_caller::<DefaultEnvironment>(accounts.bob);
+        ink::env::test::set_value_transferred::<DefaultEnvironment>(600);
+        // The off-chain test engine credits the contract but does not debit
+        // the caller, so model the live-runtime debit explicitly.
+        fund(&accounts.bob, START_BALANCE - 600);
+        assert!(contract.place_bid(auction_id, 600).is_ok());
+        assert_eq!(balance(&accounts.bob), START_BALANCE - 600);
+
+        ink::env::test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        ink::env::test::set_value_transferred::<DefaultEnvironment>(700);
+        assert!(contract.place_bid(auction_id, 700).is_ok());
+
+        // Bob got his escrow back.
+        assert_eq!(balance(&accounts.bob), START_BALANCE);
+
+        let auction = contract.get_auction(auction_id).unwrap();
+        assert_eq!(auction.current_bid, 700);
+        assert_eq!(auction.current_bidder, Some(accounts.charlie));
+        assert_eq!(auction.escrowed_value, 700);
+    }
+
+    /// Overpayment above the bid amount is refunded immediately.
+    #[ink::test]
+    fn overpayment_excess_is_refunded() {
+        let accounts = default_accounts();
+        fund(&accounts.bob, START_BALANCE);
+
+        let mut contract = FeeManager::new(100, 10, 10_000);
+        let auction_id = contract.create_premium_auction(1, 500, 3600).expect("create");
+
+        ink::env::test::set_caller::<DefaultEnvironment>(accounts.bob);
+        ink::env::test::set_value_transferred::<DefaultEnvironment>(650);
+        // Model the live-runtime debit of the full attached value.
+        fund(&accounts.bob, START_BALANCE - 650);
+        assert!(contract.place_bid(auction_id, 600).is_ok());
+
+        // Net cost equals exactly the bid amount (excess was refunded).
+        assert_eq!(balance(&accounts.bob), START_BALANCE - 600);
+        let auction = contract.get_auction(auction_id).unwrap();
+        assert_eq!(auction.escrowed_value, 600);
+    }
+
+    /// Settlement pays the escrowed winning bid to the seller exactly once.
+    #[ink::test]
+    fn settlement_pays_seller_from_escrow() {
+        let accounts = default_accounts();
+        fund(&accounts.alice, START_BALANCE);
+        fund(&accounts.bob, START_BALANCE);
+
+        let mut contract = FeeManager::new(100, 10, 10_000);
+        let auction_id = contract.create_premium_auction(1, 500, 3600).expect("create");
+
+        ink::env::test::set_caller::<DefaultEnvironment>(accounts.bob);
+        ink::env::test::set_value_transferred::<DefaultEnvironment>(700);
+        assert!(contract.place_bid(auction_id, 700).is_ok());
+
+        // Advance past the auction deadline.
+        for _ in 0..2_000 {
+            ink::env::test::advance_block::<DefaultEnvironment>();
+        }
+
+        assert!(contract.settle_auction(auction_id).is_ok());
+
+        // Seller received the winning bid from custody.
+        assert_eq!(balance(&accounts.alice), START_BALANCE + 700);
+        let auction = contract.get_auction(auction_id).unwrap();
+        assert!(auction.settled);
+        assert_eq!(auction.escrowed_value, 0);
+
+        // Double settlement is impossible.
+        assert_eq!(
+            contract.settle_auction(auction_id),
+            Err(FeeError::AlreadySettled)
+        );
     }
 
     #[ink::test]

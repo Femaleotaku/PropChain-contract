@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 #![allow(clippy::needless_borrows_for_generic_args)]
@@ -1309,6 +1310,30 @@ pub mod propchain_identity {
             Ok(())
         }
 
+        /// Admin: configure social recovery guardians for a target identity.
+        #[ink(message)]
+        pub fn set_recovery_guardians(
+            &mut self,
+            target_account: AccountId,
+            guardians: Vec<AccountId>,
+            threshold: u8,
+        ) -> Result<(), IdentityError> {
+            if self.env().caller() != self.admin {
+                return Err(IdentityError::Unauthorized);
+            }
+
+            let mut identity = self
+                .identities
+                .get(&target_account)
+                .ok_or(IdentityError::IdentityNotFound)?;
+
+            identity.social_recovery.guardians = guardians;
+            identity.social_recovery.threshold = threshold;
+            self.identities.insert(&target_account, &identity);
+
+            Ok(())
+        }
+
         /// Port an existing identity to a new account
         #[ink(message)]
         pub fn port_identity(&mut self, new_account: AccountId) -> Result<(), IdentityError> {
@@ -1661,6 +1686,11 @@ pub mod propchain_identity {
             Ok(())
         }
 
+        /// Revokes an account's verifier authorization.
+        ///
+        /// Admin only (`IdentityError::Unauthorized` otherwise). Marks the
+        /// verifier as unauthorized in the mapping; revoking an address that
+        /// was never authorized succeeds silently.
         #[ink(message)]
         pub fn remove_authorized_verifier(
             &mut self,
@@ -1673,6 +1703,11 @@ pub mod propchain_identity {
             Ok(())
         }
 
+        /// Adds a cross-chain id to the supported-chains list.
+        ///
+        /// Admin only (`IdentityError::Unauthorized` otherwise). Adding a
+        /// chain that is already listed is a no-op; the registry is seeded
+        /// with chains 1–5 at construction.
         #[ink(message)]
         pub fn add_supported_chain(&mut self, chain_id: ChainId) -> Result<(), IdentityError> {
             if self.env().caller() != self.admin {
@@ -1684,6 +1719,8 @@ pub mod propchain_identity {
             Ok(())
         }
 
+        /// Returns every chain id currently accepted for cross-chain
+        /// identity verification.
         #[ink(message)]
         pub fn get_supported_chains(&self) -> Vec<ChainId> {
             self.supported_chains.clone()
@@ -1755,6 +1792,12 @@ pub mod propchain_identity {
 
         // ===== Verification Provider Methods - Issue #283 =====
 
+        /// Registers an external KYC verification provider.
+        ///
+        /// Admin only (`IdentityError::Unauthorized` otherwise). The provider
+        /// starts active with the given name (fixed 64-byte field),
+        /// `ProviderType`, and the tiers it may verify; a `provider_registered`
+        /// audit entry is recorded.
         #[ink(message)]
         pub fn register_verification_provider(
             &mut self,
@@ -1790,6 +1833,11 @@ pub mod propchain_identity {
             Ok(())
         }
 
+        /// Deactivates a verification provider so it can no longer receive
+        /// or complete KYC requests.
+        ///
+        /// Admin only (`IdentityError::Unauthorized` for non-admins);
+        /// unknown providers fail with `IdentityError::IdentityNotFound`.
         #[ink(message)]
         pub fn deactivate_provider(&mut self, provider_id: AccountId) -> Result<(), IdentityError> {
             if self.env().caller() != self.admin {
@@ -1807,6 +1855,8 @@ pub mod propchain_identity {
             Ok(())
         }
 
+        /// Returns the registration record for a verification provider,
+        /// or `None` if the id was never registered.
         #[ink(message)]
         pub fn get_verification_provider(
             &self,
@@ -1817,6 +1867,13 @@ pub mod propchain_identity {
 
         // ===== KYC Tier Verification - Issue #282 & #283 =====
 
+        /// Opens a KYC verification request with a provider for the caller.
+        ///
+        /// The provider must exist (`IdentityError::IdentityNotFound`) and be
+        /// active, and must support `requested_tier` (both failures return
+        /// `IdentityError::VerificationFailed`). Returns a sequential request
+        /// id starting at 1; the request starts in `Pending` status and an
+        /// audit entry is recorded.
         #[ink(message)]
         pub fn request_kyc_verification(
             &mut self,
@@ -1870,6 +1927,14 @@ pub mod propchain_identity {
             Ok(request_id)
         }
 
+        /// Completes a KYC verification request (approve or reject).
+        ///
+        /// Callable only by the provider the request was filed with
+        /// (`IdentityError::Unauthorized` otherwise); unknown request ids fail
+        /// with `IdentityError::IdentityNotFound` and non-pending requests
+        /// with `IdentityError::VerificationFailed`. On approval the
+        /// applicant's KYC tier is set to the requested tier; `result_metadata`
+        /// is stored verbatim on the request.
         #[ink(message)]
         pub fn complete_kyc_verification(
             &mut self,
@@ -1964,16 +2029,23 @@ pub mod propchain_identity {
             Ok(())
         }
 
+        /// Returns the KYC tier granted to `account`, or `None` if the
+        /// account has never been verified.
         #[ink(message)]
         pub fn get_user_kyc_tier(&self, account: AccountId) -> Option<KycTier> {
             self.user_kyc_tiers.get(&account)
         }
 
+        /// Returns the privilege limits configured for `tier` (max
+        /// transaction value, daily transaction count, trading permission),
+        /// or `None` if the tier is not configured.
         #[ink(message)]
         pub fn get_kyc_tier_privileges(&self, tier: KycTier) -> Option<KycTierPrivileges> {
             self.kyc_tier_privileges.get(&tier)
         }
 
+        /// Returns the full KYC verification request with the given id,
+        /// or `None` if it does not exist.
         #[ink(message)]
         pub fn get_provider_verification_request(
             &self,
@@ -1982,6 +2054,14 @@ pub mod propchain_identity {
             self.provider_verification_requests.get(&request_id)
         }
 
+        /// Checks whether `account`'s KYC tier permits a transaction of
+        /// `transaction_value`.
+        ///
+        /// Accounts without a tier are treated as `Tier0Unverified`. Returns
+        /// `Ok(true)` when the value is within the tier's max transaction
+        /// value and the daily limit is not exhausted, `Ok(false)` when a
+        /// limit is exceeded, and `IdentityError::IdentityNotFound` if the
+        /// tier has no configured privileges.
         #[ink(message)]
         pub fn check_tier_privileges(
             &self,
@@ -2137,5 +2217,10 @@ pub mod propchain_identity {
             let caller = self.env().caller();
             self.data_deletion_requests.get(caller)
         }
+    }
+
+    /// Dashboard interface exposing aggregated views over this registry.
+    pub mod dashboard {
+        include!("src/dashboard.rs");
     }
 }

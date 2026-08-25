@@ -1,8 +1,15 @@
-//! Identity Management Dashboard Interface
-//! 
-//! This module provides a high-level interface for identity management operations
-//! that can be used by frontend applications and dashboards.
+// Identity Management Dashboard Interface
+//
+// This module provides a high-level interface for identity management operations
+// that can be used by frontend applications and dashboards.
+//
+// Cross-contract queries are dispatched with explicit message selectors so no
+// additional trait surface is required on the registry. Because the off-chain
+// test engine cannot execute contract invocations, every message is split into
+// a thin dispatching wrapper plus a pure `build_*` constructor that is unit
+// tested against seeded registry state.
 
+use ink::env::call::{build_call, ExecutionInput, Selector};
 use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
 use ink::primitives::AccountId;
@@ -14,6 +21,58 @@ pub struct IdentityDashboard {
 }
 
 impl IdentityDashboard {
+    /// Issue a read-only cross-contract query against the registry.
+    fn query_registry<A: scale::Encode, R: scale::Decode>(
+        &self,
+        selector: [u8; 4],
+        args: A,
+    ) -> Option<R> {
+        match build_call::<ink::env::DefaultEnvironment>()
+            .call(self.registry)
+            .exec_input(ExecutionInput::new(Selector::new(selector)).push_arg(&args))
+            .returns::<R>()
+            .try_invoke()
+        {
+            Ok(ink::primitives::MessageResult::Ok(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn registry_get_identity(&self, account: AccountId) -> Option<Identity> {
+        self.query_registry(ink::selector_bytes!("get_identity"), &(account,))
+    }
+
+    fn registry_get_reputation_metrics(&self, account: AccountId) -> Option<ReputationMetrics> {
+        self.query_registry(ink::selector_bytes!("get_reputation_metrics"), &(account,))
+    }
+
+    fn registry_get_trust_assessment(
+        &self,
+        assessor: AccountId,
+        target: AccountId,
+    ) -> Option<TrustAssessment> {
+        self.query_registry(
+            ink::selector_bytes!("get_trust_assessment"),
+            &(assessor, target),
+        )
+    }
+
+    fn registry_get_cross_chain_verification(
+        &self,
+        account: AccountId,
+        chain_id: ChainId,
+    ) -> Option<CrossChainVerification> {
+        self.query_registry(
+            ink::selector_bytes!("get_cross_chain_verification"),
+            &(account, chain_id),
+        )
+    }
+
+    fn registry_get_supported_chains(&self) -> Vec<ChainId> {
+        self.query_registry(ink::selector_bytes!("get_supported_chains"), &())
+            .unwrap_or_default()
+    }
+
     /// Create new dashboard interface
     pub fn new(registry_address: AccountId) -> Self {
         Self {
@@ -23,14 +82,25 @@ impl IdentityDashboard {
 
     /// Get complete identity profile for dashboard display
     pub fn get_identity_profile(&self, account: AccountId) -> Option<IdentityProfile> {
-        use ink::env::call::FromAccountId;
-        let registry: ink::contract_ref!(IdentityRegistry) =
-            FromAccountId::from_account_id(self.registry);
+        let identity = self.registry_get_identity(account)?;
+        let reputation_metrics = self.registry_get_reputation_metrics(account)?;
+        let cross_chain_verifications = self.get_cross_chain_summary(account);
+        Some(Self::build_identity_profile(
+            account,
+            identity,
+            reputation_metrics,
+            cross_chain_verifications,
+        ))
+    }
 
-        let identity = registry.get_identity(account)?;
-        let reputation_metrics = registry.get_reputation_metrics(account)?;
-
-        Some(IdentityProfile {
+    /// Pure aggregation behind [`Self::get_identity_profile`].
+    pub fn build_identity_profile(
+        account: AccountId,
+        identity: Identity,
+        reputation_metrics: ReputationMetrics,
+        cross_chain_verifications: Vec<CrossChainSummary>,
+    ) -> IdentityProfile {
+        IdentityProfile {
             account_id: account,
             did: identity.did_document.did,
             verification_level: identity.verification_level,
@@ -48,95 +118,127 @@ impl IdentityDashboard {
                 average_transaction_value: reputation_metrics.average_transaction_value,
                 total_value_transacted: reputation_metrics.total_value_transacted,
                 success_rate: if reputation_metrics.total_transactions > 0 {
-                    (reputation_metrics.successful_transactions * 100) / reputation_metrics.total_transactions
+                    (reputation_metrics.successful_transactions * 100)
+                        / reputation_metrics.total_transactions
                 } else {
                     0
                 },
             },
             privacy_settings: identity.privacy_settings,
-            cross_chain_verifications: self.get_cross_chain_summary(account),
-        })
+            cross_chain_verifications,
+        }
     }
 
     /// Get trust assessment summary for counterparty evaluation
     pub fn get_trust_summary(&self, assessor: AccountId, target: AccountId) -> Option<TrustSummary> {
-        use ink::env::call::FromAccountId;
-        let registry: ink::contract_ref!(IdentityRegistry) =
-            FromAccountId::from_account_id(self.registry);
+        let trust_assessment = self.registry_get_trust_assessment(assessor, target)?;
+        let target_identity = self.registry_get_identity(target)?;
+        Some(Self::build_trust_summary(
+            target,
+            trust_assessment,
+            target_identity,
+        ))
+    }
 
-        let trust_assessment = registry.get_trust_assessment(assessor, target)?;
-        let target_identity = registry.get_identity(target)?;
-
-        Some(TrustSummary {
-            target_account: target,
-            trust_score: trust_assessment.trust_score,
-            risk_level: trust_assessment.risk_level,
+    /// Pure aggregation behind [`Self::get_trust_summary`].
+    pub fn build_trust_summary(
+        target_account: AccountId,
+        assessment: TrustAssessment,
+        target_identity: Identity,
+    ) -> TrustSummary {
+        TrustSummary {
+            target_account,
+            trust_score: assessment.trust_score,
+            risk_level: assessment.risk_level.clone(),
             verification_level: target_identity.verification_level,
             reputation_score: target_identity.reputation_score,
             is_verified: target_identity.is_verified,
-            assessment_expires: trust_assessment.expires_at,
-            last_assessed: trust_assessment.assessment_date,
-            recommended_actions: self.get_recommended_actions(&trust_assessment),
-        })
+            assessment_expires: assessment.expires_at,
+            last_assessed: assessment.assessment_date,
+            recommended_actions: Self::recommended_actions_for(&assessment.risk_level),
+        }
     }
 
     /// Get identity verification status and requirements
     pub fn get_verification_status(&self, account: AccountId) -> Option<VerificationStatus> {
-        use ink::env::call::FromAccountId;
-        let registry: ink::contract_ref!(IdentityRegistry) =
-            FromAccountId::from_account_id(self.registry);
+        let identity = self.registry_get_identity(account)?;
+        Some(Self::build_verification_status(account, identity))
+    }
 
-        let identity = registry.get_identity(account)?;
-
-        Some(VerificationStatus {
+    /// Pure aggregation behind [`Self::get_verification_status`].
+    pub fn build_verification_status(
+        account: AccountId,
+        identity: Identity,
+    ) -> VerificationStatus {
+        VerificationStatus {
             account_id: account,
             current_level: identity.verification_level,
             is_verified: identity.is_verified,
             verified_at: identity.verified_at,
             expires_at: identity.verification_expires,
-            next_required_level: self.get_next_verification_level(&identity.verification_level),
-            verification_steps: self.get_verification_steps(&identity.verification_level),
-        })
+            next_required_level: Self::next_verification_level(&identity.verification_level),
+            verification_steps: Self::verification_steps(&identity.verification_level),
+        }
     }
 
     /// Get privacy and security settings
-    pub fn get_privacy_security_settings(&self, account: AccountId) -> Option<PrivacySecuritySettings> {
-        use ink::env::call::FromAccountId;
-        let registry: ink::contract_ref!(IdentityRegistry) =
-            FromAccountId::from_account_id(self.registry);
+    pub fn get_privacy_security_settings(
+        &self,
+        account: AccountId,
+    ) -> Option<PrivacySecuritySettings> {
+        let identity = self.registry_get_identity(account)?;
+        let supported_chains = self.registry_get_supported_chains();
+        let cross_chain_verifications = self.get_cross_chain_count(account);
+        Some(Self::build_privacy_security_settings(
+            account,
+            identity,
+            supported_chains,
+            cross_chain_verifications,
+        ))
+    }
 
-        let identity = registry.get_identity(account)?;
-
-        Some(PrivacySecuritySettings {
+    /// Pure aggregation behind [`Self::get_privacy_security_settings`].
+    pub fn build_privacy_security_settings(
+        account: AccountId,
+        identity: Identity,
+        supported_chains: Vec<ChainId>,
+        cross_chain_verifications: u32,
+    ) -> PrivacySecuritySettings {
+        PrivacySecuritySettings {
             account_id: account,
             privacy_settings: identity.privacy_settings.clone(),
             social_recovery_enabled: !identity.social_recovery.guardians.is_empty(),
             guardian_count: identity.social_recovery.guardians.len() as u8,
             recovery_threshold: identity.social_recovery.threshold,
             is_recovery_active: identity.social_recovery.is_recovery_active,
-            supported_chains: registry.get_supported_chains(),
-            cross_chain_verifications: self.get_cross_chain_count(account),
-        })
+            supported_chains,
+            cross_chain_verifications,
+        }
     }
 
     /// Get transaction and activity history
-    pub fn get_activity_history(&self, account: AccountId, limit: u32) -> ActivityHistory {
-        use ink::env::call::FromAccountId;
-        let registry: ink::contract_ref!(IdentityRegistry) =
-            FromAccountId::from_account_id(self.registry);
+    pub fn get_activity_history(&self, account: AccountId, _limit: u32) -> ActivityHistory {
+        let reputation_metrics = self.registry_get_reputation_metrics(account);
+        Self::build_activity_history(account, reputation_metrics)
+    }
 
-        let reputation_metrics = registry.get_reputation_metrics(account)
-            .unwrap_or_else(|| ReputationMetrics {
-                total_transactions: 0,
-                successful_transactions: 0,
-                failed_transactions: 0,
-                dispute_count: 0,
-                dispute_resolved_count: 0,
-                average_transaction_value: 0,
-                total_value_transacted: 0,
-                last_updated: 0,
-                reputation_score: 500,
-            });
+    /// Pure aggregation behind [`Self::get_activity_history`]. Falls back to
+    /// zeroed defaults when the account has no recorded metrics.
+    pub fn build_activity_history(
+        account: AccountId,
+        reputation_metrics: Option<ReputationMetrics>,
+    ) -> ActivityHistory {
+        let reputation_metrics = reputation_metrics.unwrap_or_else(|| ReputationMetrics {
+            total_transactions: 0,
+            successful_transactions: 0,
+            failed_transactions: 0,
+            dispute_count: 0,
+            dispute_resolved_count: 0,
+            average_transaction_value: 0,
+            total_value_transacted: 0,
+            last_updated: 0,
+            reputation_score: 500,
+        });
 
         ActivityHistory {
             account_id: account,
@@ -170,38 +272,47 @@ impl IdentityDashboard {
 
     // Helper methods
     fn get_cross_chain_summary(&self, account: AccountId) -> Vec<CrossChainSummary> {
-        use ink::env::call::FromAccountId;
-        let registry: ink::contract_ref!(IdentityRegistry) =
-            FromAccountId::from_account_id(self.registry);
-
-        let identity = match registry.get_identity(account) {
-            Some(id) => id,
-            None => return Vec::new(),
-        };
-
-        let supported_chains = registry.get_supported_chains();
-        let mut summaries = Vec::new();
-
-        for chain_id in supported_chains {
-            if let Some(verification) = registry.get_cross_chain_verification(account, chain_id) {
-                summaries.push(CrossChainSummary {
-                    chain_id,
-                    chain_name: self.get_chain_name(chain_id),
-                    verified_at: verification.verified_at,
-                    reputation_score: verification.reputation_score,
-                    is_active: verification.is_active,
-                });
-            }
+        if self.registry_get_identity(account).is_none() {
+            return Vec::new();
         }
 
-        summaries
+        let supported_chains = self.registry_get_supported_chains();
+        let verifications: Vec<(ChainId, Option<CrossChainVerification>)> = supported_chains
+            .iter()
+            .map(|chain_id| {
+                (
+                    *chain_id,
+                    self.registry_get_cross_chain_verification(account, *chain_id),
+                )
+            })
+            .collect();
+
+        Self::build_cross_chain_summary(verifications)
+    }
+
+    /// Pure aggregation behind [`Self::get_cross_chain_summary`].
+    pub fn build_cross_chain_summary(
+        verifications: Vec<(ChainId, Option<CrossChainVerification>)>,
+    ) -> Vec<CrossChainSummary> {
+        verifications
+            .into_iter()
+            .filter_map(|(chain_id, verification)| {
+                verification.map(|v| CrossChainSummary {
+                    chain_id,
+                    chain_name: Self::chain_name(chain_id),
+                    verified_at: v.verified_at,
+                    reputation_score: v.reputation_score,
+                    is_active: v.is_active,
+                })
+            })
+            .collect()
     }
 
     fn get_cross_chain_count(&self, account: AccountId) -> u32 {
         self.get_cross_chain_summary(account).len() as u32
     }
 
-    fn get_chain_name(&self, chain_id: ChainId) -> String {
+    fn chain_name(chain_id: ChainId) -> String {
         match chain_id {
             1 => "Ethereum".to_string(),
             2 => "Polkadot".to_string(),
@@ -212,7 +323,7 @@ impl IdentityDashboard {
         }
     }
 
-    fn get_next_verification_level(&self, current: &VerificationLevel) -> VerificationLevel {
+    fn next_verification_level(current: &VerificationLevel) -> VerificationLevel {
         match current {
             VerificationLevel::None => VerificationLevel::Basic,
             VerificationLevel::Basic => VerificationLevel::Standard,
@@ -222,7 +333,7 @@ impl IdentityDashboard {
         }
     }
 
-    fn get_verification_steps(&self, current: &VerificationLevel) -> Vec<String> {
+    fn verification_steps(current: &VerificationLevel) -> Vec<String> {
         match current {
             VerificationLevel::None => vec![
                 "Create DID document".to_string(),
@@ -244,10 +355,10 @@ impl IdentityDashboard {
         }
     }
 
-    fn get_recommended_actions(&self, assessment: &TrustAssessment) -> Vec<String> {
+    fn recommended_actions_for(risk: &RiskLevel) -> Vec<String> {
         let mut actions = Vec::new();
 
-        match assessment.risk_level {
+        match risk {
             RiskLevel::Low => {
                 actions.push("Proceed with transaction".to_string());
                 actions.push("Standard verification sufficient".to_string());
@@ -379,5 +490,6 @@ pub struct DashboardStatistics {
     pub recovery_requests: u64,
 }
 
-pub mod cross_contract_helper;
-
+pub mod cross_contract_helper {
+    include!("cross_contract_helper.rs");
+}
