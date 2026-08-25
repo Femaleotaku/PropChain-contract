@@ -854,5 +854,283 @@ mod propchain_prediction_market {
             let result = contract.claim_winnings(market_id);
             assert_eq!(result, Err(Error::LoserCannotClaim));
         }
+
+        // ── Manual resolution & claim tests (Issue #1017) ─────────────────────
+
+        /// Creates a manual-resolution market (target 500_000, resolution_time 1_000)
+        /// with a 1% protocol fee, administered by Alice.
+        fn setup_manual_market() -> (
+            PredictionMarket,
+            ink::env::test::DefaultAccounts<ink::env::DefaultEnvironment>,
+            u64,
+        ) {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            let mut contract = PredictionMarket::new(accounts.alice, 100); // fee_bips = 100 (1%)
+            let market_id = contract
+                .create_market(1, 500_000, 1_000)
+                .expect("market creation must succeed");
+            (contract, accounts, market_id)
+        }
+
+        /// Sets `account` as the caller with `amount` as transferred value,
+        /// ready for a payable `stake_prediction` call.
+        fn set_staker(account: AccountId, amount: u128) {
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(account);
+            ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(amount);
+        }
+
+        #[ink::test]
+        fn resolve_market_requires_admin() {
+            let (mut contract, accounts, market_id) = setup_manual_market();
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            let result = contract.resolve_market(market_id, 600_000);
+            assert_eq!(result, Err(Error::Unauthorized));
+
+            // Market state must be untouched by the failed resolution attempt
+            let market = contract.get_market(market_id).unwrap();
+            assert_eq!(market.status, MarketStatus::Active);
+            assert_eq!(market.winning_direction, None);
+            assert_eq!(market.resolved_value, None);
+        }
+
+        #[ink::test]
+        fn resolve_market_before_deadline_rejected() {
+            let (mut contract, _, market_id) = setup_manual_market();
+
+            // Block timestamp defaults to 0, which is < resolution_time (1_000)
+            let result = contract.resolve_market(market_id, 600_000);
+            assert_eq!(result, Err(Error::MarketNotReadyForResolution));
+
+            let market = contract.get_market(market_id).unwrap();
+            assert_eq!(market.status, MarketStatus::Active);
+        }
+
+        #[ink::test]
+        fn stake_after_resolution_deadline_rejected() {
+            let (mut contract, accounts, market_id) = setup_manual_market();
+
+            // Advance to exactly the resolution deadline: staking is closed
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(1_000);
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(1_000);
+            let result = contract.stake_prediction(market_id, PredictionDirection::Long);
+            assert_eq!(result, Err(Error::MarketNotActive));
+        }
+
+        #[ink::test]
+        fn resolve_market_long_wins_when_value_equals_target() {
+            let (mut contract, accounts, market_id) = setup_manual_market();
+
+            set_staker(accounts.bob, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Long)
+                .unwrap();
+
+            // Boundary: block_timestamp == resolution_time allows resolution
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(1_000);
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+
+            // Boundary: resolved_value == target_value resolves Long (>= semantics)
+            contract.resolve_market(market_id, 500_000).unwrap();
+
+            let market = contract.get_market(market_id).unwrap();
+            assert_eq!(market.status, MarketStatus::Resolved);
+            assert_eq!(market.winning_direction, Some(PredictionDirection::Long));
+            assert_eq!(market.resolved_value, Some(500_000));
+            assert_eq!(market.total_long, 1_000);
+        }
+
+        #[ink::test]
+        fn double_resolution_rejected() {
+            let (mut contract, accounts, market_id) = setup_manual_market();
+
+            set_staker(accounts.bob, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Long)
+                .unwrap();
+            set_staker(accounts.charlie, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Short)
+                .unwrap();
+
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(1_001);
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            contract.resolve_market(market_id, 600_000).unwrap();
+
+            // Second resolution attempt hits the MarketAlreadyResolved guard
+            let result = contract.resolve_market(market_id, 400_000);
+            assert_eq!(result, Err(Error::MarketAlreadyResolved));
+
+            // Original resolution outcome is preserved
+            let market = contract.get_market(market_id).unwrap();
+            assert_eq!(market.resolved_value, Some(600_000));
+            assert_eq!(market.winning_direction, Some(PredictionDirection::Long));
+        }
+
+        #[ink::test]
+        fn winner_claim_pays_proportional_payout_minus_fee() {
+            use scale::Decode as _;
+
+            let (mut contract, accounts, market_id) = setup_manual_market();
+
+            // Bob stakes Long 1_000, Charlie stakes Short 3_000
+            set_staker(accounts.bob, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Long)
+                .unwrap();
+            set_staker(accounts.charlie, 3_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Short)
+                .unwrap();
+
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(1_001);
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            contract.resolve_market(market_id, 600_000).unwrap(); // Long wins
+
+            // Payout math (see claim_reward):
+            //   total_reward = 1_000 + (1_000 * 3_000) / 1_000 = 4_000
+            //   fee          = 4_000 * 100 / 10_000           = 40    (fee_bips=100 → 1%)
+            //   payout       = 4_000 - 40                     = 3_960
+            let bob_before =
+                ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.bob)
+                    .expect("bob account must exist");
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            contract.claim_reward(market_id).unwrap();
+
+            let bob_after =
+                ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.bob)
+                    .expect("bob account must exist");
+            assert_eq!(bob_after - bob_before, 3_960);
+
+            // Winner gains a perfect reputation entry
+            let rep = contract.get_user_reputation(accounts.bob);
+            assert_eq!(rep.total_predictions, 1);
+            assert_eq!(rep.successful_predictions, 1);
+            assert_eq!(rep.accuracy_score, 10_000);
+
+            // Events so far: MarketCreated + 2xPredictionStaked + MarketResolved + RewardClaimed
+            let events = ink::env::test::recorded_events().collect::<Vec<_>>();
+            assert_eq!(events.len(), 5);
+            let claimed = RewardClaimed::decode(&mut &events[4].data[..]).expect("decode event");
+            assert_eq!(claimed.market_id, market_id);
+            assert_eq!(claimed.user, accounts.bob);
+            assert_eq!(claimed.amount, 3_960);
+        }
+
+        #[ink::test]
+        fn loser_claim_yields_nothing() {
+            let (mut contract, accounts, market_id) = setup_manual_market();
+
+            set_staker(accounts.bob, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Long)
+                .unwrap();
+            set_staker(accounts.charlie, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Short)
+                .unwrap();
+
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(1_001);
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            contract.resolve_market(market_id, 600_000).unwrap(); // Long wins
+
+            let charlie_before =
+                ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(
+                    accounts.charlie,
+                )
+                .expect("charlie account must exist");
+
+            // Losing side gets Err and no balance movement
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
+            let result = contract.claim_reward(market_id);
+            assert_eq!(result, Err(Error::LoserCannotClaim));
+
+            let charlie_after =
+                ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(
+                    accounts.charlie,
+                )
+                .expect("charlie account must exist");
+            assert_eq!(charlie_after, charlie_before);
+
+            // Failed claim is recorded as a bad prediction
+            let rep = contract.get_user_reputation(accounts.charlie);
+            assert_eq!(rep.total_predictions, 1);
+            assert_eq!(rep.successful_predictions, 0);
+            assert_eq!(rep.accuracy_score, 0);
+
+            // Stake stays unclaimed but marked as loser-owned; retry keeps failing
+            assert_eq!(contract.claim_reward(market_id), Err(Error::LoserCannotClaim));
+        }
+
+        #[ink::test]
+        fn double_claim_rejected() {
+            let (mut contract, accounts, market_id) = setup_manual_market();
+
+            set_staker(accounts.bob, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Long)
+                .unwrap();
+            set_staker(accounts.charlie, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Short)
+                .unwrap();
+
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(1_001);
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            contract.resolve_market(market_id, 600_000).unwrap();
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            contract.claim_reward(market_id).unwrap();
+
+            // Second claim attempt must hit the RewardAlreadyClaimed guard
+            let result = contract.claim_reward(market_id);
+            assert_eq!(result, Err(Error::RewardAlreadyClaimed));
+        }
+
+        #[ink::test]
+        fn claim_by_non_participant_rejected() {
+            let (mut contract, accounts, market_id) = setup_manual_market();
+
+            set_staker(accounts.bob, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Long)
+                .unwrap();
+
+            ink::env::test::set_block_timestamp::<ink::env::DefaultEnvironment>(1_001);
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            contract.resolve_market(market_id, 600_000).unwrap();
+
+            // Frank never staked on this market
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.frank);
+            let result = contract.claim_reward(market_id);
+            assert_eq!(result, Err(Error::StakeNotFound));
+        }
+
+        #[ink::test]
+        fn claim_before_resolution_rejected() {
+            let (mut contract, accounts, market_id) = setup_manual_market();
+
+            set_staker(accounts.bob, 1_000);
+            contract
+                .stake_prediction(market_id, PredictionDirection::Long)
+                .unwrap();
+
+            // Market is still Active: claiming must fail without paying out
+            let bob_before =
+                ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.bob)
+                    .expect("bob account must exist");
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            let result = contract.claim_reward(market_id);
+            assert_eq!(result, Err(Error::MarketNotActive));
+
+            let bob_after =
+                ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.bob)
+                    .expect("bob account must exist");
+            assert_eq!(bob_after, bob_before);
+        }
     }
 }
