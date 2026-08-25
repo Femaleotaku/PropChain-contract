@@ -425,20 +425,16 @@ mod governance {
                     self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
                 }
                 ProposalStatus::Approved => {
-                    self.approved_proposal_count =
-                        self.approved_proposal_count.saturating_sub(1);
+                    self.approved_proposal_count = self.approved_proposal_count.saturating_sub(1);
                 }
                 ProposalStatus::Executed => {
-                    self.executed_proposal_count =
-                        self.executed_proposal_count.saturating_sub(1);
+                    self.executed_proposal_count = self.executed_proposal_count.saturating_sub(1);
                 }
                 ProposalStatus::Rejected => {
-                    self.rejected_proposal_count =
-                        self.rejected_proposal_count.saturating_sub(1);
+                    self.rejected_proposal_count = self.rejected_proposal_count.saturating_sub(1);
                 }
                 ProposalStatus::Cancelled => {
-                    self.cancelled_proposal_count =
-                        self.cancelled_proposal_count.saturating_sub(1);
+                    self.cancelled_proposal_count = self.cancelled_proposal_count.saturating_sub(1);
                 }
                 ProposalStatus::Expired => {}
             }
@@ -446,9 +442,13 @@ mod governance {
             // Participation bookkeeping: count a closure only when leaving the
             // open set, so re-opened/closed-again proposals are never double
             // counted.
-            if !matches!(proposal.status, ProposalStatus::Executed | ProposalStatus::Rejected)
-                && matches!(new_status, ProposalStatus::Executed | ProposalStatus::Rejected)
-            {
+            if !matches!(
+                proposal.status,
+                ProposalStatus::Executed | ProposalStatus::Rejected
+            ) && matches!(
+                new_status,
+                ProposalStatus::Executed | ProposalStatus::Rejected
+            ) {
                 let signer_count = self.signers.len() as u64;
                 if signer_count > 0 {
                     let total_votes =
@@ -456,27 +456,23 @@ mod governance {
                     let bps = total_votes.saturating_mul(10_000) / signer_count;
                     self.participation_sum_bps = self.participation_sum_bps.saturating_add(bps);
                 }
-                self.closed_participation_count =
-                    self.closed_participation_count.saturating_add(1);
+                self.closed_participation_count = self.closed_participation_count.saturating_add(1);
             }
 
             // Increment the bucket for the new status.
             match new_status {
                 ProposalStatus::Active => {}
                 ProposalStatus::Approved => {
-                    self.approved_proposal_count =
-                        self.approved_proposal_count.saturating_add(1);
+                    self.approved_proposal_count = self.approved_proposal_count.saturating_add(1);
                 }
                 ProposalStatus::Executed => {
-                    self.executed_proposal_count =
-                        self.executed_proposal_count.saturating_add(1);
+                    self.executed_proposal_count = self.executed_proposal_count.saturating_add(1);
                 }
                 ProposalStatus::Rejected => {
                     self.rejected_proposal_count = self.rejected_proposal_count.saturating_add(1);
                 }
                 ProposalStatus::Cancelled => {
-                    self.cancelled_proposal_count =
-                        self.cancelled_proposal_count.saturating_add(1);
+                    self.cancelled_proposal_count = self.cancelled_proposal_count.saturating_add(1);
                 }
                 ProposalStatus::Expired => {}
             }

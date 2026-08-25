@@ -617,17 +617,31 @@ mod sanctions_screening {
             contract.set_max_sanctioned_entities(2).expect("set cap");
 
             let first = contract
-                .add_sanctioned_entity(b"One".to_vec(), EntityType::Individual, 1, SanctionLevel::Monitored)
+                .add_sanctioned_entity(
+                    b"One".to_vec(),
+                    EntityType::Individual,
+                    1,
+                    SanctionLevel::Monitored,
+                )
                 .expect("first at boundary");
             assert_eq!(contract.active_entity_count(), 1);
 
             let _second = contract
-                .add_sanctioned_entity(b"Two".to_vec(), EntityType::Individual, 2, SanctionLevel::Monitored)
+                .add_sanctioned_entity(
+                    b"Two".to_vec(),
+                    EntityType::Individual,
+                    2,
+                    SanctionLevel::Monitored,
+                )
                 .expect("second fills cap exactly");
             assert_eq!(contract.active_entity_count(), 2);
 
-            let overflow = contract
-                .add_sanctioned_entity(b"Three".to_vec(), EntityType::Individual, 3, SanctionLevel::Monitored);
+            let overflow = contract.add_sanctioned_entity(
+                b"Three".to_vec(),
+                EntityType::Individual,
+                3,
+                SanctionLevel::Monitored,
+            );
             assert_eq!(overflow, Err(Error::SanctionListFull));
         }
 
@@ -637,19 +651,34 @@ mod sanctions_screening {
             contract.set_max_sanctioned_entities(1).expect("set cap");
 
             let id = contract
-                .add_sanctioned_entity(b"Full".to_vec(), EntityType::Corporation, 7, SanctionLevel::Prohibited)
+                .add_sanctioned_entity(
+                    b"Full".to_vec(),
+                    EntityType::Corporation,
+                    7,
+                    SanctionLevel::Prohibited,
+                )
                 .expect("fills cap");
 
             // Cap is full.
             assert_eq!(
-                contract.add_sanctioned_entity(b"No Room".to_vec(), EntityType::Trust, 8, SanctionLevel::Restricted),
+                contract.add_sanctioned_entity(
+                    b"No Room".to_vec(),
+                    EntityType::Trust,
+                    8,
+                    SanctionLevel::Restricted
+                ),
                 Err(Error::SanctionListFull)
             );
 
             // Soft removal frees the slot for a subsequent add.
             contract.remove_sanctioned_entity(id).expect("remove");
             let replacement = contract
-                .add_sanctioned_entity(b"Frees Slot".to_vec(), EntityType::Trust, 8, SanctionLevel::Restricted)
+                .add_sanctioned_entity(
+                    b"Frees Slot".to_vec(),
+                    EntityType::Trust,
+                    8,
+                    SanctionLevel::Restricted,
+                )
                 .expect("slot freed");
             assert_ne!(replacement, id);
         }
@@ -659,11 +688,18 @@ mod sanctions_screening {
             let mut contract = default_contract();
             contract.set_max_sanctioned_entities(1).expect("set cap");
             let id = contract
-                .add_sanctioned_entity(b"Once".to_vec(), EntityType::Individual, 9, SanctionLevel::Monitored)
+                .add_sanctioned_entity(
+                    b"Once".to_vec(),
+                    EntityType::Individual,
+                    9,
+                    SanctionLevel::Monitored,
+                )
                 .expect("add");
 
             contract.remove_sanctioned_entity(id).expect("first remove");
-            contract.remove_sanctioned_entity(id).expect("idempotent remove");
+            contract
+                .remove_sanctioned_entity(id)
+                .expect("idempotent remove");
 
             assert_eq!(contract.active_entity_count(), 0);
 

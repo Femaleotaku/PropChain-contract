@@ -735,7 +735,11 @@ mod propchain_analytics {
             bullish.add_market_trend(trend(5, 10));
             bullish.update_market_sentiment(1, 800, 200);
             let bull_report = bullish.generate_market_report();
-            assert!(bull_report.insights.contains("upward"), "{}", bull_report.insights);
+            assert!(
+                bull_report.insights.contains("upward"),
+                "{}",
+                bull_report.insights
+            );
             assert!(bull_report.insights.contains("increasing"));
             assert!(bull_report.insights.contains("bullish"));
 
