@@ -2243,5 +2243,4 @@ mod insurance_admin_rotation_tests {
             Err(InsuranceError::KeyRotationCooldown)
         );
     }
-
 }
