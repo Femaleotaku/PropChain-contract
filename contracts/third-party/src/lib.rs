@@ -534,7 +534,9 @@ mod propchain_third_party {
         use super::*;
 
         fn setup() -> ThirdPartyIntegration {
-            test::set_caller::<DefaultEnvironment>(test::default_accounts::<DefaultEnvironment>().alice);
+            test::set_caller::<DefaultEnvironment>(
+                test::default_accounts::<DefaultEnvironment>().alice,
+            );
             ThirdPartyIntegration::new()
         }
 
@@ -638,8 +640,9 @@ mod propchain_third_party {
             );
 
             test::set_caller::<DefaultEnvironment>(accounts.bob);
-            let request_id =
-                contract.initiate_kyc_request(service_id, accounts.bob, "ref-3".into()).unwrap();
+            let request_id = contract
+                .initiate_kyc_request(service_id, accounts.bob, "ref-3".into())
+                .unwrap();
 
             // Only the provider may resolve the request
             test::set_caller::<DefaultEnvironment>(accounts.eve);

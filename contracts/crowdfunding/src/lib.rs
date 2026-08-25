@@ -1,4 +1,4 @@
-﻿#![cfg_attr(not(feature = "std"), no_std, no_main)]
+#![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
@@ -555,8 +555,8 @@ mod propchain_crowdfunding {
                 .raised_amount
                 .checked_add(amount)
                 .ok_or(CrowdfundingError::ArithmeticOverflow)?;
-            let shares = u64::try_from(amount / 1000)
-                .map_err(|_| CrowdfundingError::ArithmeticOverflow)?;
+            let shares =
+                u64::try_from(amount / 1000).map_err(|_| CrowdfundingError::ArithmeticOverflow)?;
             let new_share_total = self
                 .share_holdings
                 .get((campaign_id, caller))
@@ -568,7 +568,8 @@ mod propchain_crowdfunding {
             if current == 0 {
                 campaign.investor_count += 1;
             }
-            self.investments.insert((campaign_id, caller), &new_investment_total);
+            self.investments
+                .insert((campaign_id, caller), &new_investment_total);
             campaign.raised_amount = new_raised_amount;
             if campaign.raised_amount >= campaign.target_amount {
                 campaign.status = CampaignStatus::Funded;

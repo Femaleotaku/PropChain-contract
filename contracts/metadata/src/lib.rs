@@ -815,7 +815,9 @@ mod propchain_metadata {
         use super::*;
 
         fn setup() -> AdvancedMetadataRegistry {
-            test::set_caller::<DefaultEnvironment>(test::default_accounts::<DefaultEnvironment>().alice);
+            test::set_caller::<DefaultEnvironment>(
+                test::default_accounts::<DefaultEnvironment>().alice,
+            );
             AdvancedMetadataRegistry::new()
         }
 
@@ -837,7 +839,9 @@ mod propchain_metadata {
 
         fn sample_ipfs() -> IpfsResources {
             IpfsResources {
-                metadata_cid: Some("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".into()),
+                metadata_cid: Some(
+                    "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".into(),
+                ),
                 documents_cid: None,
                 images_cid: None,
                 legal_docs_cid: None,
@@ -847,9 +851,16 @@ mod propchain_metadata {
         }
 
         fn create_sample_metadata(contract: &mut AdvancedMetadataRegistry, property_id: u64) {
-            test::set_caller::<DefaultEnvironment>(test::default_accounts::<DefaultEnvironment>().bob);
+            test::set_caller::<DefaultEnvironment>(
+                test::default_accounts::<DefaultEnvironment>().bob,
+            );
             assert_eq!(
-                contract.create_metadata(property_id, sample_core(), sample_ipfs(), [1u8; 32].into()),
+                contract.create_metadata(
+                    property_id,
+                    sample_core(),
+                    sample_ipfs(),
+                    [1u8; 32].into()
+                ),
                 Ok(())
             );
         }
@@ -950,15 +961,35 @@ mod propchain_metadata {
 
             // All mutating paths are closed after finalization
             assert_eq!(
-                contract.update_metadata(1, sample_core(), sample_ipfs(), [5u8; 32].into(), "x".into(), None),
+                contract.update_metadata(
+                    1,
+                    sample_core(),
+                    sample_ipfs(),
+                    [5u8; 32].into(),
+                    "x".into(),
+                    None
+                ),
                 Err(Error::MetadataAlreadyFinalized)
             );
             assert_eq!(
-                contract.add_custom_attribute(1, "key".into(), MetadataValue::Text("v".into()), false),
+                contract.add_custom_attribute(
+                    1,
+                    "key".into(),
+                    MetadataValue::Text("v".into()),
+                    false
+                ),
                 Err(Error::MetadataAlreadyFinalized)
             );
             assert_eq!(
-                contract.add_media_item(1, 0, "ipfs://img".into(), "photo".into(), "image/png".into(), 100, [6u8; 32].into()),
+                contract.add_media_item(
+                    1,
+                    0,
+                    "ipfs://img".into(),
+                    "photo".into(),
+                    "image/png".into(),
+                    100,
+                    [6u8; 32].into()
+                ),
                 Err(Error::MetadataAlreadyFinalized)
             );
         }
@@ -969,27 +1000,63 @@ mod propchain_metadata {
             create_sample_metadata(&mut contract, 1);
 
             // Shrink the per-category limit to one for easy testing
-            test::set_caller::<DefaultEnvironment>(test::default_accounts::<DefaultEnvironment>().alice);
+            test::set_caller::<DefaultEnvironment>(
+                test::default_accounts::<DefaultEnvironment>().alice,
+            );
             assert_eq!(contract.update_limits(50, 1, 50), Ok(()));
-            test::set_caller::<DefaultEnvironment>(test::default_accounts::<DefaultEnvironment>().bob);
+            test::set_caller::<DefaultEnvironment>(
+                test::default_accounts::<DefaultEnvironment>().bob,
+            );
 
             assert_eq!(
-                contract.add_media_item(1, 0, "ipfs://img-1".into(), "front".into(), "image/png".into(), 10, [1u8; 32].into()),
+                contract.add_media_item(
+                    1,
+                    0,
+                    "ipfs://img-1".into(),
+                    "front".into(),
+                    "image/png".into(),
+                    10,
+                    [1u8; 32].into()
+                ),
                 Ok(())
             );
             // Second image hits the limit; other categories are unaffected
             assert_eq!(
-                contract.add_media_item(1, 0, "ipfs://img-2".into(), "back".into(), "image/png".into(), 10, [2u8; 32].into()),
+                contract.add_media_item(
+                    1,
+                    0,
+                    "ipfs://img-2".into(),
+                    "back".into(),
+                    "image/png".into(),
+                    10,
+                    [2u8; 32].into()
+                ),
                 Err(Error::SizeLimitExceeded)
             );
             assert_eq!(
-                contract.add_media_item(1, 3, "ipfs://plan-1".into(), "plan".into(), "image/svg".into(), 20, [3u8; 32].into()),
+                contract.add_media_item(
+                    1,
+                    3,
+                    "ipfs://plan-1".into(),
+                    "plan".into(),
+                    "image/svg".into(),
+                    20,
+                    [3u8; 32].into()
+                ),
                 Ok(())
             );
 
             // Invalid category code is rejected
             assert_eq!(
-                contract.add_media_item(1, 9, "ipfs://x".into(), "?".into(), "application/octet-stream".into(), 1, [4u8; 32].into()),
+                contract.add_media_item(
+                    1,
+                    9,
+                    "ipfs://x".into(),
+                    "?".into(),
+                    "application/octet-stream".into(),
+                    1,
+                    [4u8; 32].into()
+                ),
                 Err(Error::InvalidMetadata)
             );
 
