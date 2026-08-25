@@ -63,6 +63,10 @@ pub enum MulticallError {
     Paused,
     /// Caller is not the admin.
     Unauthorized,
+    /// Native tokens were attached to the call but the multicall contract
+    /// does not forward message-level value. Per-call value should be set
+    /// via `CallRequest.transferred_value`.
+    UnexpectedValue,
 }
 
 // ---------------------------------------------------------------------------

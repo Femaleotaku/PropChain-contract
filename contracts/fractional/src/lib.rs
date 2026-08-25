@@ -978,61 +978,65 @@ pub mod fractional {
 
         /// Bid on a Dutch auction at the current descending price.
         /// Buyer must attach sufficient payment for the current price of all shares.
+        ///
+        /// Wrapped in a reentrancy guard, matching `buy_shares` and `add_liquidity`.
         #[ink(message, payable)]
         pub fn bid_dutch_auction(&mut self, auction_id: u64) -> Result<(), FractionalError> {
-            let caller = self.env().caller();
-            let payment = self.env().transferred_value();
+            non_reentrant!(self, {
+                let caller = self.env().caller();
+                let payment = self.env().transferred_value();
 
-            let mut auction = self
-                .dutch_auctions
-                .get(auction_id)
-                .ok_or(FractionalError::AuctionNotFound)?;
+                let mut auction = self
+                    .dutch_auctions
+                    .get(auction_id)
+                    .ok_or(FractionalError::AuctionNotFound)?;
 
-            if auction.has_bids {
-                return Err(FractionalError::AuctionAlreadyBid);
-            }
+                if auction.has_bids {
+                    return Err(FractionalError::AuctionAlreadyBid);
+                }
 
-            let current_block = self.env().block_number() as u64;
-            let current_price = self.calculate_dutch_price(&auction, current_block);
-            let total_price = current_price.saturating_mul(auction.shares);
+                let current_block = self.env().block_number() as u64;
+                let current_price = self.calculate_dutch_price(&auction, current_block);
+                let total_price = current_price.saturating_mul(auction.shares);
 
-            if payment < total_price {
-                return Err(FractionalError::InsufficientPayment);
-            }
+                if payment < total_price {
+                    return Err(FractionalError::InsufficientPayment);
+                }
 
-            // Transfer shares from seller to buyer
-            let seller_held = self
-                .balances
-                .get((auction.seller, auction.token_id))
-                .unwrap_or(0);
-            self.balances.insert(
-                (auction.seller, auction.token_id),
-                &seller_held.saturating_sub(auction.shares),
-            );
+                // Transfer shares from seller to buyer
+                let seller_held = self
+                    .balances
+                    .get((auction.seller, auction.token_id))
+                    .unwrap_or(0);
+                self.balances.insert(
+                    (auction.seller, auction.token_id),
+                    &seller_held.saturating_sub(auction.shares),
+                );
 
-            let buyer_held = self.balances.get((caller, auction.token_id)).unwrap_or(0);
-            self.balances.insert(
-                (caller, auction.token_id),
-                &buyer_held.saturating_add(auction.shares),
-            );
+                let buyer_held = self.balances.get((caller, auction.token_id)).unwrap_or(0);
+                self.balances.insert(
+                    (caller, auction.token_id),
+                    &buyer_held.saturating_add(auction.shares),
+                );
 
-            // Mark auction as complete
-            auction.has_bids = true;
-            self.dutch_auctions.insert(auction_id, &auction);
+                // Mark auction as complete
+                auction.has_bids = true;
+                self.dutch_auctions.insert(auction_id, &auction);
 
-            // Pay the seller
-            if self.env().transfer(auction.seller, total_price).is_err() {
-                // Non-fatal: payment forwarding failed (e.g. in unit tests)
-            }
+                // Pay the seller
+                if self.env().transfer(auction.seller, total_price).is_err() {
+                    // Non-fatal: payment forwarding failed (e.g. in unit tests)
+                }
 
-            self.env().emit_event(DutchAuctionBid {
-                auction_id,
-                buyer: caller,
-                shares: auction.shares,
-                price_paid: total_price,
-            });
+                self.env().emit_event(DutchAuctionBid {
+                    auction_id,
+                    buyer: caller,
+                    shares: auction.shares,
+                    price_paid: total_price,
+                });
 
-            Ok(())
+                Ok(())
+            })
         }
 
         /// Cancel a Dutch auction (seller only, before any bid).
