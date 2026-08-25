@@ -7,8 +7,21 @@
     clippy::manual_checked_ops
 )]
 
+// Required by the standalone `delegation` helper module in no_std builds.
+extern crate alloc;
+
+// Standalone governance helpers wired into the build per Issue #982 (they
+// were previously dead files that were never compiled or tested). They are
+// unit-tested by `cargo test -p propchain-governance`; exposing them on the
+// on-chain message surface remains a separate feature decision.
+pub mod delegation;
+pub mod treasury;
+
+#[cfg(test)]
+mod snapshot_tests;
+
 #[ink::contract]
-mod governance {
+pub mod governance {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use propchain_traits::constants;
@@ -154,6 +167,20 @@ mod governance {
         threshold: u32,
         proposal_counter: u64,
         active_proposal_count: u32,
+        /// Proposals currently in `Approved` (timelock) state.
+        /// Maintained incrementally so `get_analytics` stays O(1) (Issue #972).
+        approved_proposal_count: u64,
+        /// Total proposals that reached `Executed`.
+        executed_proposal_count: u64,
+        /// Total proposals that reached `Rejected`.
+        rejected_proposal_count: u64,
+        /// Total proposals that were cancelled.
+        cancelled_proposal_count: u64,
+        /// Closed proposals that contribute to the participation average
+        /// (`Executed` or `Rejected`), counted exactly once each.
+        closed_participation_count: u64,
+        /// Sum of per-proposal participation bps over all closed proposals.
+        participation_sum_bps: u64,
         proposals: Mapping<u64, GovernanceProposal>,
         votes: Mapping<(u64, AccountId), bool>,
         timelock_blocks: u64,
@@ -202,6 +229,12 @@ mod governance {
                 threshold: safe_threshold,
                 proposal_counter: 0,
                 active_proposal_count: 0,
+                approved_proposal_count: 0,
+                executed_proposal_count: 0,
+                rejected_proposal_count: 0,
+                cancelled_proposal_count: 0,
+                closed_participation_count: 0,
+                participation_sum_bps: 0,
                 proposals: Mapping::default(),
                 votes: Mapping::default(),
                 timelock_blocks,
@@ -361,80 +394,104 @@ mod governance {
         }
 
         /// Returns the governance analytics.
+        ///
+        /// All figures are served from counters maintained incrementally at
+        /// each status transition (see `apply_status_transition`), so this is
+        /// O(1) storage reads regardless of how many proposals exist — the
+        /// previous implementation rescanned the entire proposal history on
+        /// every call, which grows without bound (Issue #972).
         #[ink(message)]
         pub fn get_analytics(&self) -> GovernanceAnalytics {
-            let total = self.proposal_counter;
-            let mut executed = 0;
-            let mut rejected = 0;
-            let mut cancelled = 0;
-            let mut active = 0;
-
-            let mut total_participation_bps: u64 = 0;
-            let mut closed_count = 0;
-
-            let signer_count = self.signers.len() as u64;
-
-            for id in 0..total {
-                if let Some(proposal) = self.proposals.get(id) {
-                    match proposal.status {
-                        ProposalStatus::Active => active += 1,
-                        ProposalStatus::Approved => active += 1,
-                        ProposalStatus::Executed => {
-                            executed += 1;
-                            closed_count += 1;
-                            if signer_count > 0 {
-                                let total_votes =
-                                    (proposal.votes_for.saturating_add(proposal.votes_against))
-                                        as u64;
-                                let bps = total_votes.saturating_mul(10_000) / signer_count;
-                                total_participation_bps =
-                                    total_participation_bps.saturating_add(bps);
-                            }
-                        }
-                        ProposalStatus::Rejected => {
-                            rejected += 1;
-                            closed_count += 1;
-                            if signer_count > 0 {
-                                let total_votes =
-                                    (proposal.votes_for.saturating_add(proposal.votes_against))
-                                        as u64;
-                                let bps = total_votes.saturating_mul(10_000) / signer_count;
-                                total_participation_bps =
-                                    total_participation_bps.saturating_add(bps);
-                            }
-                        }
-                        ProposalStatus::Cancelled => {
-                            cancelled += 1;
-                        }
-                        ProposalStatus::Expired => {
-                            closed_count += 1;
-                            if signer_count > 0 {
-                                let total_votes =
-                                    (proposal.votes_for.saturating_add(proposal.votes_against))
-                                        as u64;
-                                let bps = total_votes.saturating_mul(10_000) / signer_count;
-                                total_participation_bps =
-                                    total_participation_bps.saturating_add(bps);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let avg_participation_bps = if closed_count > 0 {
-                (total_participation_bps / closed_count) as u32
+            let avg_participation_bps = if self.closed_participation_count > 0 {
+                (self.participation_sum_bps / self.closed_participation_count) as u32
             } else {
                 0
             };
 
             GovernanceAnalytics {
-                total_proposals: total,
-                executed_proposals: executed,
-                rejected_proposals: rejected,
-                cancelled_proposals: cancelled,
-                active_proposals: active,
+                total_proposals: self.proposal_counter,
+                executed_proposals: self.executed_proposal_count,
+                rejected_proposals: self.rejected_proposal_count,
+                cancelled_proposals: self.cancelled_proposal_count,
+                active_proposals: self.active_proposal_count as u64 + self.approved_proposal_count,
                 avg_participation_bps,
             }
+        }
+
+        /// Move `proposal` into `new_status`, keeping every analytics counter
+        /// consistent without rescanning proposal history (Issue #972).
+        ///
+        /// Handles arbitrary transitions uniformly (including emergency
+        /// overrides of already-rejected proposals): the counter for the old
+        /// status is decremented and the new status incremented. A proposal
+        /// contributes to the participation average exactly once — when it
+        /// first leaves the open set (`Active`/`Approved`) into a closing
+        /// status (`Executed`/`Rejected`), matching the historical behaviour
+        /// of the brute-force scan.
+        fn apply_status_transition(
+            &mut self,
+            proposal: &mut GovernanceProposal,
+            new_status: ProposalStatus,
+        ) {
+            // Decrement the bucket for the current status.
+            match proposal.status {
+                ProposalStatus::Active => {
+                    self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
+                }
+                ProposalStatus::Approved => {
+                    self.approved_proposal_count = self.approved_proposal_count.saturating_sub(1);
+                }
+                ProposalStatus::Executed => {
+                    self.executed_proposal_count = self.executed_proposal_count.saturating_sub(1);
+                }
+                ProposalStatus::Rejected => {
+                    self.rejected_proposal_count = self.rejected_proposal_count.saturating_sub(1);
+                }
+                ProposalStatus::Cancelled => {
+                    self.cancelled_proposal_count = self.cancelled_proposal_count.saturating_sub(1);
+                }
+                ProposalStatus::Expired => {}
+            }
+
+            // Participation bookkeeping: count a closure only when leaving the
+            // open set, so re-opened/closed-again proposals are never double
+            // counted.
+            if !matches!(
+                proposal.status,
+                ProposalStatus::Executed | ProposalStatus::Rejected
+            ) && matches!(
+                new_status,
+                ProposalStatus::Executed | ProposalStatus::Rejected
+            ) {
+                let signer_count = self.signers.len() as u64;
+                if signer_count > 0 {
+                    let total_votes =
+                        (proposal.votes_for.saturating_add(proposal.votes_against)) as u64;
+                    let bps = total_votes.saturating_mul(10_000) / signer_count;
+                    self.participation_sum_bps = self.participation_sum_bps.saturating_add(bps);
+                }
+                self.closed_participation_count = self.closed_participation_count.saturating_add(1);
+            }
+
+            // Increment the bucket for the new status.
+            match new_status {
+                ProposalStatus::Active => {}
+                ProposalStatus::Approved => {
+                    self.approved_proposal_count = self.approved_proposal_count.saturating_add(1);
+                }
+                ProposalStatus::Executed => {
+                    self.executed_proposal_count = self.executed_proposal_count.saturating_add(1);
+                }
+                ProposalStatus::Rejected => {
+                    self.rejected_proposal_count = self.rejected_proposal_count.saturating_add(1);
+                }
+                ProposalStatus::Cancelled => {
+                    self.cancelled_proposal_count = self.cancelled_proposal_count.saturating_add(1);
+                }
+                ProposalStatus::Expired => {}
+            }
+
+            proposal.status = new_status;
         }
 
         /// Returns all comments for a proposal.
@@ -488,13 +545,13 @@ mod governance {
             // Check if threshold reached → move to Approved with timelock
             if proposal.votes_for >= proposal.threshold {
                 let now = self.env().block_number() as u64;
-                proposal.status = ProposalStatus::Approved;
-                if proposal.is_emergency {
-                    proposal.timelock_until = now; // Bypass timelock
+                let timelock = if proposal.is_emergency {
+                    now // Bypass timelock
                 } else {
-                    proposal.timelock_until = now.saturating_add(self.timelock_blocks);
-                }
-                self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
+                    now.saturating_add(self.timelock_blocks)
+                };
+                proposal.timelock_until = timelock;
+                self.apply_status_transition(&mut proposal, ProposalStatus::Approved);
             }
 
             // Check if rejection is certain (remaining votes can't reach threshold)
@@ -502,8 +559,7 @@ mod governance {
             let total_votes = proposal.votes_for.saturating_add(proposal.votes_against);
             let remaining = total_signers.saturating_sub(total_votes);
             if proposal.votes_for.saturating_add(remaining) < proposal.threshold {
-                proposal.status = ProposalStatus::Rejected;
-                self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
+                self.apply_status_transition(&mut proposal, ProposalStatus::Rejected);
                 self.env().emit_event(ProposalRejected { proposal_id });
             }
 
@@ -579,7 +635,7 @@ mod governance {
                 return Err(Error::TimelockActive);
             }
 
-            proposal.status = ProposalStatus::Executed;
+            self.apply_status_transition(&mut proposal, ProposalStatus::Executed);
             proposal.executed_at = now;
             self.proposals.insert(proposal_id, &proposal);
 
@@ -698,10 +754,7 @@ mod governance {
                 return Err(Error::Unauthorized);
             }
 
-            if proposal.status == ProposalStatus::Active {
-                self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
-            }
-            proposal.status = ProposalStatus::Cancelled;
+            self.apply_status_transition(&mut proposal, ProposalStatus::Cancelled);
             self.proposals.insert(proposal_id, &proposal);
 
             Ok(())
@@ -802,16 +855,12 @@ mod governance {
                 return Err(Error::ProposalClosed);
             }
 
-            if proposal.status == ProposalStatus::Active {
-                self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
-            }
-
             let now = self.env().block_number() as u64;
             if execute {
-                proposal.status = ProposalStatus::Executed;
+                self.apply_status_transition(&mut proposal, ProposalStatus::Executed);
                 proposal.executed_at = now;
             } else {
-                proposal.status = ProposalStatus::Rejected;
+                self.apply_status_transition(&mut proposal, ProposalStatus::Rejected);
             }
 
             self.proposals.insert(proposal_id, &proposal);
@@ -937,13 +986,13 @@ mod governance {
             // Check if threshold reached → move to Approved with timelock
             if proposal.votes_for >= proposal.threshold {
                 let now = self.env().block_number() as u64;
-                proposal.status = ProposalStatus::Approved;
-                if proposal.is_emergency {
-                    proposal.timelock_until = now;
+                let timelock = if proposal.is_emergency {
+                    now
                 } else {
-                    proposal.timelock_until = now.saturating_add(self.timelock_blocks);
-                }
-                self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
+                    now.saturating_add(self.timelock_blocks)
+                };
+                proposal.timelock_until = timelock;
+                self.apply_status_transition(&mut proposal, ProposalStatus::Approved);
             }
 
             // Check if rejection is certain
@@ -951,8 +1000,7 @@ mod governance {
             let total_votes = proposal.votes_for.saturating_add(proposal.votes_against);
             let remaining = total_signers.saturating_sub(total_votes);
             if proposal.votes_for.saturating_add(remaining) < proposal.threshold {
-                proposal.status = ProposalStatus::Rejected;
-                self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
+                self.apply_status_transition(&mut proposal, ProposalStatus::Rejected);
                 self.env().emit_event(ProposalRejected { proposal_id });
             }
 

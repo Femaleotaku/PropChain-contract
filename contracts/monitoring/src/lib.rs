@@ -1,8 +1,16 @@
 #![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
+/// Standalone quorum-guard helper tracking governance participation drops
+/// across consecutive proposals.
+///
+/// The module is compiled and exported as part of this crate so its logic is
+/// unit-tested and reusable by integrators; automatic recording hooks into
+/// governance events are out of scope for this crate.
+pub mod quorum_guard;
+
 #[ink::contract]
-mod monitoring {
+pub mod monitoring {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use propchain_traits::constants;
@@ -784,6 +792,181 @@ mod monitoring {
             let new_admin = AccountId::from([0x05; 32]);
             c.transfer_admin(new_admin).unwrap();
             assert_eq!(c.get_admin(), new_admin);
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // Issue #1015: subscriber lifecycle & snapshot coverage
+        // ─────────────────────────────────────────────────────────────────
+
+        fn new_contract_with_admin(admin: AccountId) -> MonitoringContract {
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(admin);
+            MonitoringContract::new()
+        }
+
+        #[ink::test]
+        fn subscribe_alerts_registers_subscriber_once() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut c = new_contract_with_admin(accounts.alice);
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            c.subscribe_alerts(accounts.bob).expect("first subscribe");
+
+            // Duplicate subscribe is a silent no-op, not an error
+            c.subscribe_alerts(accounts.bob)
+                .expect("duplicate subscribe must succeed silently");
+            let subs = c.get_alert_subscribers();
+            assert_eq!(subs.len(), 1, "duplicate subscribe must not add twice");
+            assert_eq!(subs[0], accounts.bob);
+        }
+
+        #[ink::test]
+        fn unsubscribe_unknown_subscriber_returns_error() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut c = new_contract_with_admin(accounts.alice);
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            let result = c.unsubscribe_alerts(accounts.django);
+            assert_eq!(result, Err(MonitoringError::SubscriberNotFound));
+        }
+
+        #[ink::test]
+        fn get_alert_subscribers_reflects_content_and_removal_order() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut c = new_contract_with_admin(accounts.alice);
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            c.subscribe_alerts(accounts.bob).unwrap();
+            c.subscribe_alerts(accounts.charlie).unwrap();
+            c.subscribe_alerts(accounts.django).unwrap();
+
+            assert_eq!(
+                c.get_alert_subscribers(),
+                vec![accounts.bob, accounts.charlie, accounts.django],
+                "subscribers must appear in registration order"
+            );
+
+            // Removing the middle entry swaps the last one into its place
+            c.unsubscribe_alerts(accounts.charlie).unwrap();
+            assert_eq!(
+                c.get_alert_subscribers(),
+                vec![accounts.bob, accounts.django],
+                "swap_remove moves the last subscriber into the freed slot"
+            );
+        }
+
+        #[ink::test]
+        fn non_admin_cannot_manage_subscribers() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut c = new_contract_with_admin(accounts.alice);
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            assert_eq!(
+                c.subscribe_alerts(accounts.charlie),
+                Err(MonitoringError::Unauthorized)
+            );
+            assert_eq!(
+                c.unsubscribe_alerts(accounts.charlie),
+                Err(MonitoringError::Unauthorized)
+            );
+            assert!(c.get_alert_subscribers().is_empty());
+        }
+
+        #[ink::test]
+        fn snapshot_round_trip_records_expected_aggregates_from_reporter() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut c = new_contract_with_admin(accounts.alice);
+
+            // Admin authorizes bob as a reporter
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            c.add_reporter(accounts.bob).unwrap();
+            assert!(c.is_authorized_reporter(accounts.bob));
+
+            // Authorized reporter records operations: 3 successes + 1 failure
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            c.record_operation(OperationType::RegisterProperty, true)
+                .unwrap();
+            c.record_operation(OperationType::TransferProperty, true)
+                .unwrap();
+            c.record_operation(OperationType::GovernanceVote, true)
+                .unwrap();
+            c.record_operation(OperationType::BridgeTransfer, false)
+                .unwrap();
+
+            // Snapshot lands at slot 0
+            c.take_metrics_snapshot().unwrap();
+            let snap = c
+                .get_metrics_snapshot(0)
+                .expect("first snapshot must be at slot 0");
+            assert_eq!(snap.snapshot_id, 0);
+            assert_eq!(snap.total_calls, 4);
+            assert_eq!(snap.total_errors, 1);
+            assert_eq!(snap.error_rate_bips, 2_500); // 25%
+        }
+
+        #[ink::test]
+        fn consecutive_snapshots_use_distinct_slots_and_ids() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut c = new_contract_with_admin(accounts.alice);
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            c.record_operation(OperationType::Generic, true).unwrap();
+            c.take_metrics_snapshot().unwrap();
+
+            c.record_operation(OperationType::Stake, false).unwrap();
+            c.take_metrics_snapshot().unwrap();
+
+            let first = c.get_metrics_snapshot(0).expect("slot 0");
+            let second = c.get_metrics_snapshot(1).expect("second snapshot at slot 1");
+            assert_eq!(first.snapshot_id, 0);
+            assert_eq!(second.snapshot_id, 1);
+            assert_eq!(second.total_calls, 2);
+            assert_eq!(second.total_errors, 1);
+            assert_eq!(second.error_rate_bips, 5_000); // 50%
+        }
+
+        #[ink::test]
+        fn snapshot_buffer_wraps_and_overwrites_oldest_slot() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut c = new_contract_with_admin(accounts.alice);
+
+            let max = constants::MONITORING_MAX_SNAPSHOTS;
+            let extra = 3u64;
+            let total_snapshots = max + extra;
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            for _ in 0..total_snapshots {
+                c.take_metrics_snapshot().unwrap();
+            }
+            assert_eq!(c.snapshot_count, total_snapshots);
+
+            // Slot reuse: slot 0 first held snapshot 0, now holds the newest
+            // snapshot whose id maps onto slot 0 (id = max).
+            let wrapped = c.get_metrics_snapshot(0).expect("slot 0 rewritten");
+            assert_eq!(
+                wrapped.snapshot_id,
+                max,
+                "oldest snapshot in slot 0 must be overwritten"
+            );
+            // Slot 1 now holds id max+1, slot 2 holds max+2
+            assert_eq!(c.get_metrics_snapshot(1).unwrap().snapshot_id, max + 1);
+            assert_eq!(c.get_metrics_snapshot(2).unwrap().snapshot_id, max + 2);
+
+            // Slots untouched during the second pass keep their original data
+            assert_eq!(c.get_metrics_snapshot(extra).unwrap().snapshot_id, extra);
+        }
+
+        #[ink::test]
+        fn snapshot_beyond_written_count_returns_none() {
+            let mut c = new_contract();
+            assert!(c.get_metrics_snapshot(0).is_none(), "empty buffer");
+
+            c.take_metrics_snapshot().unwrap();
+            // Slot indices are bounded by MONITORING_MAX_SNAPSHOTS; anything
+            // at or above it was never written.
+            assert!(
+                c.get_metrics_snapshot(constants::MONITORING_MAX_SNAPSHOTS)
+                    .is_none()
+            );
         }
     }
 }

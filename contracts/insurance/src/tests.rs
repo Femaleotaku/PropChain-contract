@@ -78,7 +78,8 @@ mod insurance_tests {
     use ink::env::{test, DefaultEnvironment};
 
     use crate::propchain_insurance::{
-        ClaimStatus, CoverageType, InsuranceError, PolicyStatus, PropertyInsurance,
+        ClaimStatus, CoverageType, InsuranceError, PayoutMode, PolicyStatus, PropertyInsurance,
+        TriggerComparator, TriggerMetric,
     };
 
     fn setup() -> PropertyInsurance {
@@ -1694,6 +1695,322 @@ mod insurance_tests {
         let ids = contract.get_holder_parametric_policies(accounts.bob);
         assert_eq!(ids.len(), 1);
     }
+
+    // =========================================================================
+    // CLAIM TRIGGERS / ORACLE EVENTS (Issue #999)
+    // =========================================================================
+
+    /// Create a pool, fund it, assess the risk and buy an Active policy as bob.
+    fn create_active_policy(contract: &mut PropertyInsurance) -> u64 {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let pool_id = create_pool(contract);
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        test::set_value_transferred::<DefaultEnvironment>(10_000_000_000_000u128);
+        contract.provide_pool_liquidity(pool_id).unwrap();
+        add_risk_assessment(contract, 1);
+        let calc = contract
+            .calculate_premium(1, 500_000_000_000u128, CoverageType::Fire)
+            .unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        test::set_value_transferred::<DefaultEnvironment>(calc.annual_premium * 2);
+        contract
+            .create_policy(
+                1,
+                CoverageType::Fire,
+                500_000_000_000u128,
+                pool_id,
+                86_400 * 365,
+                "ipfs://policy-metadata".into(),
+            )
+            .expect("policy creation failed")
+    }
+
+    #[ink::test]
+    fn test_register_claim_trigger_works() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        // The policyholder may register a trigger on their own policy.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            )
+            .expect("trigger registration failed");
+
+        assert_eq!(trigger_id, 1);
+        assert_eq!(contract.get_trigger_count(), 1);
+        assert_eq!(contract.get_policy_triggers(policy_id), vec![trigger_id]);
+
+        let trigger = contract.get_claim_trigger(trigger_id).unwrap();
+        assert_eq!(trigger.policy_id, policy_id);
+        assert_eq!(trigger.metric, TriggerMetric::FloodDepthCm);
+        assert_eq!(trigger.comparator, TriggerComparator::GreaterOrEqual);
+        assert_eq!(trigger.threshold, 200);
+        assert!(trigger.is_active);
+        assert!(!trigger.triggered);
+        assert_eq!(trigger.last_observed_value, None);
+
+        // Admin may register too; ids increment.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        let second = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::WindSpeedKph,
+                TriggerComparator::LessOrEqual,
+                50,
+                PayoutMode::Fixed(1_000u128),
+            )
+            .unwrap();
+        assert_eq!(second, 2);
+        assert_eq!(
+            contract.get_policy_triggers(policy_id),
+            vec![trigger_id, second]
+        );
+    }
+
+    #[ink::test]
+    fn test_register_claim_trigger_unauthorized_and_missing_policy_fail() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        // A stranger may not register against bob's policy.
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        assert_eq!(
+            contract.register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            ),
+            Err(InsuranceError::Unauthorized)
+        );
+
+        // Unknown policy id.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        assert_eq!(
+            contract.register_claim_trigger(
+                999,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            ),
+            Err(InsuranceError::PolicyNotFound)
+        );
+
+        // Invalid payout modes are rejected up front.
+        assert_eq!(
+            contract.register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::Fixed(0),
+            ),
+            Err(InsuranceError::InvalidPayoutMode)
+        );
+        assert_eq!(
+            contract.register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::PercentBps(10_001),
+            ),
+            Err(InsuranceError::InvalidPayoutMode)
+        );
+        assert_eq!(contract.get_trigger_count(), 0);
+    }
+
+    #[ink::test]
+    fn test_deactivate_claim_trigger_works_once() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::RainfallMm,
+                TriggerComparator::GreaterOrEqual,
+                100,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+
+        // Deactivating twice must fail: the second call sees an inactive
+        // trigger before any authorization check.
+        assert!(contract.deactivate_claim_trigger(trigger_id).is_ok());
+        let trigger = contract.get_claim_trigger(trigger_id).unwrap();
+        assert!(!trigger.is_active);
+        assert_eq!(
+            contract.deactivate_claim_trigger(trigger_id),
+            Err(InsuranceError::TriggerInactive)
+        );
+
+        // Strangers cannot deactivate a still-active trigger...
+        let other = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::WindSpeedKph,
+                TriggerComparator::LessOrEqual,
+                40,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        assert_eq!(
+            contract.deactivate_claim_trigger(other),
+            Err(InsuranceError::Unauthorized)
+        );
+
+        // ...and unknown ids report TriggerNotFound.
+        assert_eq!(
+            contract.deactivate_claim_trigger(999),
+            Err(InsuranceError::TriggerNotFound)
+        );
+    }
+
+    #[ink::test]
+    fn test_report_oracle_event_requires_admin_or_oracle() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+
+        // Neither the policyholder nor a stranger is an authorized reporter.
+        assert_eq!(
+            contract.report_oracle_event(trigger_id, 300, "ipfs://report".into()),
+            Err(InsuranceError::Unauthorized)
+        );
+
+        // Admin is always allowed and records the observation without firing
+        // when the condition is unmet.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            contract.report_oracle_event(trigger_id, 100, "ipfs://report".into()),
+            Ok(None)
+        );
+        let trigger = contract.get_claim_trigger(trigger_id).unwrap();
+        assert_eq!(trigger.last_observed_value, Some(100));
+        assert!(!trigger.triggered);
+        assert_eq!(contract.get_claim_count(), 0);
+    }
+
+    #[ink::test]
+    fn test_report_oracle_event_threshold_boundary_met_vs_unmet() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+
+        // GreaterOrEqual with threshold 150: exactly 149 does not fire,
+        // exactly 150 does. The boundary itself is the decision point.
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::EarthquakeMagnitude,
+                TriggerComparator::GreaterOrEqual,
+                150,
+                PayoutMode::Fixed(10_000_000u128),
+            )
+            .unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            contract.report_oracle_event(trigger_id, 149, "ipfs://r".into()),
+            Ok(None)
+        );
+        assert!(!contract.get_claim_trigger(trigger_id).unwrap().triggered);
+
+        let claim_id = contract
+            .report_oracle_event(trigger_id, 150, "ipfs://r2".into())
+            .expect("boundary-met report must fire");
+        assert_eq!(claim_id, Some(1));
+    }
+
+    #[ink::test]
+    fn test_report_oracle_event_fires_claims_and_pays_exactly_once() {
+        let mut contract = setup();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        let policy_id = create_active_policy(&mut contract);
+        let pool_id = 1;
+
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let trigger_id = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::FloodDepthCm,
+                TriggerComparator::GreaterOrEqual,
+                200,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+
+        // An authorized oracle (distinct from admin) fires the trigger.
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        contract.authorize_oracle(accounts.charlie).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.charlie);
+        let claim_id = contract
+            .report_oracle_event(trigger_id, 250, "ipfs://flood-report".into())
+            .expect("authorized oracle report failed");
+        assert_eq!(claim_id, Some(1));
+
+        // The auto-claim was created, approved and paid from the pool.
+        let claim = contract.get_claim(1).unwrap();
+        assert_eq!(claim.policy_id, policy_id);
+        assert_eq!(claim.claimant, accounts.bob);
+        assert_eq!(claim.status, ClaimStatus::Paid);
+        assert!(claim.payout_amount > 0);
+
+        let pool = contract.get_pool(pool_id).unwrap();
+        assert!(pool.total_claims_paid > 0);
+
+        // One-shot semantics: a re-fired trigger is rejected.
+        assert_eq!(
+            contract.report_oracle_event(trigger_id, 260, "ipfs://again".into()),
+            Err(InsuranceError::TriggerAlreadyFired)
+        );
+        let trigger = contract.get_claim_trigger(trigger_id).unwrap();
+        assert!(trigger.triggered);
+        assert_eq!(trigger.triggering_claim_id, Some(1));
+        assert!(trigger.triggered_at.is_some());
+
+        // Reporting to a deactivated trigger fails even for admin.
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let other = contract
+            .register_claim_trigger(
+                policy_id,
+                TriggerMetric::TemperatureCelsius,
+                TriggerComparator::LessOrEqual,
+                -10,
+                PayoutMode::FullCoverage,
+            )
+            .unwrap();
+        contract.deactivate_claim_trigger(other).unwrap();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        assert_eq!(
+            contract.report_oracle_event(other, 5, "ipfs://late".into()),
+            Err(InsuranceError::TriggerInactive)
+        );
+    }
 }
 
 // =========================================================================
@@ -1925,5 +2242,377 @@ mod insurance_admin_rotation_tests {
             contract.request_admin_rotation(accounts.charlie),
             Err(InsuranceError::KeyRotationCooldown)
         );
+    }
+}
+
+// ============================================================================
+// Direct premium-engine tests (Issue #1018)
+//
+// `calculate_dynamic_premium` in premium_engine.rs is private to module
+// `propchain_insurance`, so these tests drive the engine through the public
+// messages `calculate_premium` / `calculate_premium_with_modifiers`.
+//
+// Every expected value below is computed BY HAND from the engine formula:
+//
+//   annual = coverage × base_rate × risk × coverage_mult × pool_mult
+//            × time_mult × discount_mult × claim_freq_mult / 10^25
+//   returned annual_premium = annual × duration / SECONDS_PER_YEAR
+//   monthly_premium         = annual_premium / 12
+//
+// Fixed inputs (identical in every test):
+//   * CoverageType::Fire      → base_rate = 120 bps, coverage_mult = 100 bps
+//   * scores (75, 80, 85, 90) → weighted = (75·30 + 80·25 + 85·20 + 90·25)/100 = 82
+//                               → risk multiplier bucket 81..=90 → 85 bps
+//   * pool left UNCAPITALIZED (total_capital == 0) → pool_mult = 200 bps
+//     (engine short-circuits to the default high multiplier for empty pools,
+//     which keeps the value deterministic without depending on liquidity)
+//   * neutral modifiers       → discount_mult = 10_000, claim_freq_mult = 10_000
+// ============================================================================
+
+#[cfg(test)]
+mod premium_engine_tests {
+    use ink::env::{test, DefaultEnvironment};
+
+    use crate::propchain_insurance::{
+        CoverageType, InsuranceError, PremiumModifiers, PropertyInsurance,
+    };
+
+    const SECONDS_PER_YEAR: u64 = 31_536_000;
+    const HALF_YEAR: u64 = 15_768_000; // SECONDS_PER_YEAR / 2 (same time bucket as a year)
+    const ONE_MONTH: u64 = 2_628_000; // SECONDS_PER_YEAR / 12
+
+    /// Contract with exactly one Fire pool and a fixed risk assessment for the
+    /// given property. Pool is deliberately left with zero capital so the pool
+    /// utilization multiplier is the deterministic empty-pool default (200).
+    fn seeded(property_id: u64) -> PropertyInsurance {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        let mut contract = PropertyInsurance::new(accounts.alice);
+
+        contract
+            .create_risk_pool(
+                "Fire Pool".into(),
+                CoverageType::Fire,
+                8000,
+                500_000_000_000u128,
+            )
+            .expect("pool creation failed");
+
+        // Scores chosen so the weighted score is exactly 82 → risk mult 85.
+        contract
+            .update_risk_assessment(property_id, 75, 80, 85, 90, 86_400 * 365)
+            .expect("risk assessment failed");
+
+        contract
+    }
+
+    fn neutral_modifiers() -> PremiumModifiers {
+        PremiumModifiers {
+            has_multiple_policies: false,
+            claim_free_years: 0,
+            has_safety_features: false,
+            loyalty_years: 0,
+            recent_claims_count: 0,
+        }
+    }
+
+    #[ink::test]
+    fn test_premium_exact_baseline_fire_one_year() {
+        let contract = seeded(1);
+        let coverage = 1_000_000_000_000_000_000u128; // 1e18
+
+        let calc = contract
+            .calculate_premium(1, coverage, CoverageType::Fire)
+            .expect("premium calculation failed");
+
+        // Multiplier components (fixed by the seeding above):
+        assert_eq!(calc.base_rate, 120); // Fire base rate (bps)
+        assert_eq!(calc.risk_multiplier, 85); // weighted score 82 → bucket 81..=90
+        assert_eq!(calc.coverage_multiplier, 100); // Fire coverage multiplier
+        assert_eq!(calc.pool_utilization_multiplier, 200); // empty-pool default
+        assert_eq!(calc.time_multiplier, 90); // 6–12 months bucket covers 1 year
+        assert_eq!(calc.discount_multiplier, 10_000); // no discounts
+        assert_eq!(calc.claim_freq_multiplier, 10_000); // no recent claims
+
+        // annual = 1e18 × 120 × 85 × 100 × 200 × 90 × 10^4 × 10^4 / 10^25
+        //        = 1.836e36 / 1e25 = 183_600_000_000
+        // Duration is exactly one year, so no proration change.
+        assert_eq!(calc.annual_premium, 183_600_000_000u128);
+        // monthly = 183_600_000_000 / 12
+        assert_eq!(calc.monthly_premium, 15_300_000_000u128);
+
+        // Deductible: overall score 82 → risk_adjustment bucket `_` → 50 bps;
+        // rate = 500 + 50 = 550 bps; no safety features.
+        // deductible = 1e18 × 550 / 10_000
+        assert_eq!(calc.deductible, 55_000_000_000_000_000u128);
+
+        // Breakdown: base_premium = 1e18 × 120 / 10_000
+        assert_eq!(calc.breakdown.base_premium, 12_000_000_000_000_000u128);
+        // risk_adjustment applies ANOTHER /10_000 after multiplying by the
+        // risk multiplier (85 < 10_000), so it saturates to zero at any sane
+        // coverage — exact engine behaviour, asserted here on purpose.
+        assert_eq!(calc.breakdown.risk_adjustment, 0u128);
+        assert_eq!(calc.breakdown.coverage_adjustment, 0u128);
+        assert_eq!(calc.breakdown.pool_adjustment, 0u128);
+        assert_eq!(calc.breakdown.time_adjustment, 0u128);
+        assert_eq!(calc.breakdown.discount_amount, 0u128);
+        assert_eq!(calc.breakdown.claim_freq_adjustment, 0u128);
+    }
+
+    #[ink::test]
+    fn test_premium_multiple_policies_discount_exact() {
+        let contract = seeded(1);
+        let mut modifiers = neutral_modifiers();
+        modifiers.has_multiple_policies = true; // +1500 bps discount
+
+        let calc = contract
+            .calculate_premium_with_modifiers(
+                1,
+                1_000_000_000_000_000_000u128,
+                CoverageType::Fire,
+                SECONDS_PER_YEAR,
+                modifiers,
+            )
+            .unwrap();
+
+        assert_eq!(calc.discount_multiplier, 8_500);
+        // annual = 1.836e32 × 8_500 / 10^25 = 156_060_000_000
+        assert_eq!(calc.annual_premium, 156_060_000_000u128);
+    }
+
+    #[ink::test]
+    fn test_premium_claim_free_years_discount_exact() {
+        let contract = seeded(1);
+        let mut modifiers = neutral_modifiers();
+        modifiers.claim_free_years = 3; // 3 years → +1500 bps discount
+
+        let calc = contract
+            .calculate_premium_with_modifiers(
+                1,
+                1_000_000_000_000_000_000u128,
+                CoverageType::Fire,
+                SECONDS_PER_YEAR,
+                modifiers,
+            )
+            .unwrap();
+
+        assert_eq!(calc.discount_multiplier, 8_500);
+        assert_eq!(calc.annual_premium, 156_060_000_000u128);
+
+        // breakdown.discount_amount = P/10^21 − (P/10^21 × 8500/10_000)
+        // where P = 1e18 × … × 90 = 1.836e28 → 18_360_000 − 15_606_000
+        assert_eq!(calc.breakdown.discount_amount, 2_754_000u128);
+    }
+
+    #[ink::test]
+    fn test_premium_safety_features_discount_and_deductible_exact() {
+        let contract = seeded(1);
+        let mut modifiers = neutral_modifiers();
+        modifiers.has_safety_features = true; // +1000 bps discount, −50 bps deductible
+
+        let calc = contract
+            .calculate_premium_with_modifiers(
+                1,
+                1_000_000_000_000_000_000u128,
+                CoverageType::Fire,
+                SECONDS_PER_YEAR,
+                modifiers,
+            )
+            .unwrap();
+
+        assert_eq!(calc.discount_multiplier, 9_000);
+        // annual = 1.836e32 × 9_000 / 10^25
+        assert_eq!(calc.annual_premium, 165_240_000_000u128);
+        // Deductible rate drops from 550 to 500 bps → 1e18 × 500 / 10_000
+        assert_eq!(calc.deductible, 50_000_000_000_000_000u128);
+        assert_eq!(calc.breakdown.discount_amount, 1_836_000u128);
+    }
+
+    #[ink::test]
+    fn test_premium_loyalty_discount_exact() {
+        let contract = seeded(1);
+        let mut modifiers = neutral_modifiers();
+        modifiers.loyalty_years = 4; // 3..=5 → +600 bps discount
+
+        let calc = contract
+            .calculate_premium_with_modifiers(
+                1,
+                1_000_000_000_000_000_000u128,
+                CoverageType::Fire,
+                SECONDS_PER_YEAR,
+                modifiers,
+            )
+            .unwrap();
+
+        assert_eq!(calc.discount_multiplier, 9_400);
+        // annual = 1.836e32 × 9_400 / 10^25
+        assert_eq!(calc.annual_premium, 172_584_000_000u128);
+        assert_eq!(calc.breakdown.discount_amount, 1_101_600u128);
+    }
+
+    #[ink::test]
+    fn test_premium_recent_claims_surcharge_exact() {
+        let contract = seeded(1);
+        let mut modifiers = neutral_modifiers();
+        modifiers.recent_claims_count = 2; // 2 claims → 12_500 bps surcharge
+
+        let calc = contract
+            .calculate_premium_with_modifiers(
+                1,
+                1_000_000_000_000_000_000u128,
+                CoverageType::Fire,
+                SECONDS_PER_YEAR,
+                modifiers,
+            )
+            .unwrap();
+
+        assert_eq!(calc.claim_freq_multiplier, 12_500);
+        // annual = 1.836e28 × 10^4 × 12_500 / 10^25 = 229_500_000_000
+        assert_eq!(calc.annual_premium, 229_500_000_000u128);
+
+        // Surcharge amount at the breakdown helper's internal scale:
+        // pre_freq  = 1.836e32 / 10^25           = 18_360_000
+        // post_freq = 18_360_000 × 12500 / 10^4  = 22_950_000
+        assert_eq!(calc.breakdown.claim_freq_adjustment, 4_590_000u128);
+    }
+
+    #[ink::test]
+    fn test_premium_recent_claims_cap_at_five() {
+        let contract = seeded(1);
+        let mut modifiers = neutral_modifiers();
+        modifiers.recent_claims_count = 5; // 5+ claims → capped at 20_000 bps
+
+        let calc = contract
+            .calculate_premium_with_modifiers(
+                1,
+                1_000_000_000_000_000_000u128,
+                CoverageType::Fire,
+                SECONDS_PER_YEAR,
+                modifiers,
+            )
+            .unwrap();
+
+        assert_eq!(calc.claim_freq_multiplier, 20_000);
+        // annual = 1.836e32 × 20_000 / 10^25
+        assert_eq!(calc.annual_premium, 367_200_000_000u128);
+    }
+
+    #[ink::test]
+    fn test_premium_total_discount_capped_at_forty_percent() {
+        let contract = seeded(1);
+        let mut modifiers = neutral_modifiers();
+        modifiers.has_multiple_policies = true; // +1500
+        modifiers.claim_free_years = 5; // +2000 (4+ years tier)
+        modifiers.has_safety_features = true; // +1000
+        modifiers.loyalty_years = 7; // +1000 (6+ years tier)
+        // Raw sum 5500 bps exceeds the 4000 bps cap → clamped to 4000.
+
+        let calc = contract
+            .calculate_premium_with_modifiers(
+                1,
+                1_000_000_000_000_000_000u128,
+                CoverageType::Fire,
+                SECONDS_PER_YEAR,
+                modifiers,
+            )
+            .unwrap();
+
+        assert_eq!(calc.discount_multiplier, 6_000);
+        // annual = 1.836e32 × 6_000 / 10^25
+        assert_eq!(calc.annual_premium, 110_160_000_000u128);
+        // 18_360_000 − 18_360_000 × 6000/10^4 = 18_360_000 − 11_016_000
+        assert_eq!(calc.breakdown.discount_amount, 7_344_000u128);
+        // Safety features still reduce the deductible even when discounts cap
+        assert_eq!(calc.deductible, 50_000_000_000_000_000u128);
+    }
+
+    #[ink::test]
+    fn test_premium_duration_proration_half_year() {
+        let contract = seeded(1);
+
+        // HALF_YEAR stays inside the 15_552_001..=31_536_000 time bucket (90),
+        // isolating pure proration from time-multiplier changes.
+        let calc = contract
+            .calculate_premium_with_modifiers(
+                1,
+                1_000_000_000_000_000_000u128,
+                CoverageType::Fire,
+                HALF_YEAR,
+                neutral_modifiers(),
+            )
+            .unwrap();
+
+        assert_eq!(calc.time_multiplier, 90);
+        // annual field = 183_600_000_000 × HALF_YEAR / SECONDS_PER_YEAR = half
+        assert_eq!(calc.annual_premium, 91_800_000_000u128);
+        assert_eq!(calc.monthly_premium, 7_650_000_000u128);
+    }
+
+    #[ink::test]
+    fn test_premium_duration_proration_one_month_changes_time_bucket() {
+        let contract = seeded(1);
+
+        // ONE_MONTH = 2_628_000 falls into the 2_592_001..=7_776_000 bucket →
+        // time_multiplier 100 AND proration factor 1/12.
+        let calc = contract
+            .calculate_premium_with_modifiers(
+                1,
+                1_000_000_000_000_000_000u128,
+                CoverageType::Fire,
+                ONE_MONTH,
+                neutral_modifiers(),
+            )
+            .unwrap();
+
+        assert_eq!(calc.time_multiplier, 100);
+        // chain with time 100 → 2.04e36 / 10^25 = 204_000_000_000; ÷ 12
+        assert_eq!(calc.annual_premium, 17_000_000_000u128);
+        // 17_000_000_000 / 12 truncates
+        assert_eq!(calc.monthly_premium, 1_416_666_666u128);
+    }
+
+    #[ink::test]
+    fn test_premium_rounding_truncates_fractional_units() {
+        let contract = seeded(1);
+
+        // Small coverage chosen so the full-chain product does not divide
+        // evenly by 10^25:
+        //   1e8 × 120 × 85 × 100 × 200 × 90 × 10^4 × 10^4 = 1.836e26
+        //   1.836e26 / 10^25 = 18.36 → truncated to 18
+        let calc = contract
+            .calculate_premium(1, 100_000_000u128, CoverageType::Fire)
+            .unwrap();
+
+        assert_eq!(calc.annual_premium, 18u128);
+        // monthly = 18 / 12 = 1 (truncated)
+        assert_eq!(calc.monthly_premium, 1u128);
+        // Deductible math is independent of the premium chain:
+        // 1e8 × 550 / 10_000
+        assert_eq!(calc.deductible, 5_500_000u128);
+        // base_premium = 1e8 × 120 / 10_000 (exact, no truncation here)
+        assert_eq!(calc.breakdown.base_premium, 1_200_000u128);
+    }
+
+    #[ink::test]
+    fn test_premium_without_assessment_property_not_insurable() {
+        // No update_risk_assessment was ever submitted for property 999
+        let contract = seeded(999);
+        let result = contract.calculate_premium(42, 1_000_000u128, CoverageType::Fire);
+        assert_eq!(result, Err(InsuranceError::PropertyNotInsurable));
+    }
+
+    #[ink::test]
+    fn test_premium_without_pool_returns_pool_not_found() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        let mut contract = PropertyInsurance::new(accounts.alice);
+
+        // Assessment exists but no pool was created at all
+        contract
+            .update_risk_assessment(1, 75, 80, 85, 90, 86_400 * 365)
+            .unwrap();
+
+        let result = contract.calculate_premium(1, 1_000_000_000_000_000_000u128, CoverageType::Fire);
+        assert_eq!(result, Err(InsuranceError::PoolNotFound));
     }
 }

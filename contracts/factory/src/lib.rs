@@ -67,6 +67,9 @@ pub mod contract_factory {
         CodeHashNotSet,
         ContractNotFound,
         InvalidParameters,
+        /// Native tokens were attached to `deploy_contract` but deployment
+        /// fees are not supported. Send zero value.
+        UnexpectedValue,
     }
 
     /// Contract Factory storage
@@ -151,13 +154,19 @@ pub mod contract_factory {
             self.code_hashes.get(contract_type)
         }
 
-        /// Deploys a new contract instance
+        /// Deploys a new contract instance.
+        ///
+        /// Attaching native tokens is not supported; deployment is free.
+        /// Send zero value with this call.
         #[ink(message, payable)]
         pub fn deploy_contract(
             &mut self,
             config: DeploymentConfig,
             version: String,
         ) -> Result<AccountId, Error> {
+            if self.env().transferred_value() > 0 {
+                return Err(Error::UnexpectedValue);
+            }
             let code_hash = self
                 .code_hashes
                 .get(config.contract_type)

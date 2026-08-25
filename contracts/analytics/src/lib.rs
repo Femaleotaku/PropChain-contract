@@ -6,8 +6,13 @@
 use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
 
+/// Standalone staking-dashboard helper with its own events, error type and
+/// unit tests (wired into the crate per Issue #983; previously a dead file
+/// that was never compiled or tested).
+pub mod staking_dashboard;
+
 #[ink::contract]
-mod propchain_analytics {
+pub mod propchain_analytics {
     use super::*;
 
     /// Market metrics representing aggregated property data.
@@ -225,13 +230,14 @@ mod propchain_analytics {
             average_price: u128,
             total_volume: u128,
             properties_listed: u64,
-        ) {
-            self.ensure_admin();
+        ) -> Result<(), AnalyticsError> {
+            self.ensure_admin()?;
             self.current_metrics = MarketMetrics {
                 average_price,
                 total_volume,
                 properties_listed,
             };
+            Ok(())
         }
 
         /// Batch update multiple market metrics in a single transaction.
@@ -240,7 +246,7 @@ mod propchain_analytics {
             &mut self,
             updates: Vec<MetricUpdate>,
         ) -> Result<(), AnalyticsError> {
-            self.ensure_admin();
+            self.ensure_admin()?;
             if updates.len() > MAX_BATCH_SIZE {
                 return Err(AnalyticsError::BatchSizeExceeded);
             }
@@ -260,7 +266,7 @@ mod propchain_analytics {
         /// Batch add multiple market trends in a single transaction.
         #[ink(message)]
         pub fn batch_add_trends(&mut self, trends: Vec<MarketTrend>) -> Result<(), AnalyticsError> {
-            self.ensure_admin();
+            self.ensure_admin()?;
             if trends.len() > MAX_BATCH_SIZE {
                 return Err(AnalyticsError::BatchSizeExceeded);
             }
@@ -274,12 +280,15 @@ mod propchain_analytics {
             Ok(())
         }
 
-        /// Create market trend analysis with historical data
+        /// Create market trend analysis with historical data.
+        ///
+        /// Admin only; returns [`AnalyticsError::Unauthorized`] for any other caller.
         #[ink(message)]
-        pub fn add_market_trend(&mut self, trend: MarketTrend) {
-            self.ensure_admin();
+        pub fn add_market_trend(&mut self, trend: MarketTrend) -> Result<(), AnalyticsError> {
+            self.ensure_admin()?;
             self.historical_trends.insert(self.trend_count, &trend);
             self.trend_count += 1;
+            Ok(())
         }
         #[ink(message)]
         pub fn get_historical_trends(&self) -> Vec<MarketTrend> {
@@ -290,6 +299,50 @@ mod propchain_analytics {
                 }
             }
             trends
+        }
+
+        /// Derive human-readable insights from the report's own data instead
+        /// of shipping a hardcoded sentence.
+        ///
+        /// The text reflects the latest trend direction (price / volume) and
+        /// the aggregated crowd sentiment, so materially different market
+        /// states produce different insights.
+        fn derive_insights(&self, trend: &MarketTrend) -> String {
+            let mut parts: Vec<String> = Vec::new();
+
+            if trend.price_change_percentage > 0 {
+                parts.push(String::from("prices are trending upward"));
+            } else if trend.price_change_percentage < 0 {
+                parts.push(String::from("prices are trending downward"));
+            } else {
+                parts.push(String::from("prices are stable"));
+            }
+
+            if trend.volume_change_percentage > 0 {
+                parts.push(String::from("trading volume is increasing"));
+            } else if trend.volume_change_percentage < 0 {
+                parts.push(String::from("trading volume is decreasing"));
+            } else {
+                parts.push(String::from("trading volume is flat"));
+            }
+
+            let total_volume = self
+                .overall_sentiment
+                .bull_volume
+                .saturating_add(self.overall_sentiment.bear_volume);
+            if total_volume == 0 {
+                parts.push(String::from("no crowd sentiment data available yet"));
+            } else if self.overall_sentiment.bull_volume > self.overall_sentiment.bear_volume {
+                parts.push(String::from("crowd sentiment leans bullish"));
+            } else if self.overall_sentiment.bear_volume > self.overall_sentiment.bull_volume {
+                parts.push(String::from("crowd sentiment leans bearish"));
+            } else {
+                parts.push(String::from("crowd sentiment is evenly split"));
+            }
+
+            let mut text = parts.join(", ");
+            text.push('.');
+            text
         }
 
         /// Create automated market reports generation
@@ -313,26 +366,28 @@ mod propchain_analytics {
                 }
             };
 
+            let insights = self.derive_insights(&latest_trend);
             MarketReport {
                 generated_at: self.env().block_timestamp(),
                 metrics: self.current_metrics.clone(),
                 trend: latest_trend,
                 sentiment: self.overall_sentiment.clone(),
-                insights: String::from(
-                    "Market is relatively stable. Gas optimization is recommended.",
-                ),
+                insights,
             }
         }
 
-        /// Update market sentiment from prediction markets
+        /// Update market sentiment from prediction markets.
+        ///
+        /// Admin only (or an authorized prediction-market integration once such
+        /// a role exists); returns [`AnalyticsError::Unauthorized`] otherwise.
         #[ink(message)]
         pub fn update_market_sentiment(
             &mut self,
             property_id: u64,
             bull_volume: u128,
             bear_volume: u128,
-        ) {
-            self.ensure_admin(); // Prediction market or admin updates this
+        ) -> Result<(), AnalyticsError> {
+            self.ensure_admin()?; // Prediction market or admin updates this
             let total_volume = bull_volume + bear_volume;
             let ratio = (bull_volume * 10000)
                 .checked_div(total_volume)
@@ -365,17 +420,21 @@ mod propchain_analytics {
                 .checked_div(total_overall)
                 .map(|n| n as u32)
                 .unwrap_or(self.overall_sentiment.bull_bear_ratio_bips);
+            Ok(())
         }
 
         /// Update portfolio positions for an owner.
+        ///
+        /// Admin only; returns [`AnalyticsError::Unauthorized`] for any other caller.
         #[ink(message)]
         pub fn set_portfolio_positions(
             &mut self,
             owner: AccountId,
             positions: Vec<PortfolioPosition>,
-        ) {
-            self.ensure_admin();
+        ) -> Result<(), AnalyticsError> {
+            self.ensure_admin()?;
             self.portfolio_positions.insert(owner, &positions);
+            Ok(())
         }
 
         /// Retrieve portfolio positions for an owner.
@@ -385,14 +444,17 @@ mod propchain_analytics {
         }
 
         /// Update property-type market trends used for portfolio rebalancing recommendations.
+        ///
+        /// Admin only; returns [`AnalyticsError::Unauthorized`] for any other caller.
         #[ink(message)]
         pub fn update_property_type_trend(
             &mut self,
             property_type: propchain_traits::PropertyType,
             trend: MarketTrend,
-        ) {
-            self.ensure_admin();
+        ) -> Result<(), AnalyticsError> {
+            self.ensure_admin()?;
             self.property_type_trends.insert(property_type, &trend);
+            Ok(())
         }
 
         /// Get the stored market trend for a specific property type.
@@ -412,15 +474,18 @@ mod propchain_analytics {
         }
 
         /// Update the benchmark index for a property type against a basket of reference indices.
+        ///
+        /// Admin only; returns [`AnalyticsError::Unauthorized`] for any other caller.
         #[ink(message)]
         pub fn update_benchmark_index(
             &mut self,
             property_type: propchain_traits::PropertyType,
             performance_change_percentage: i32,
-        ) {
-            self.ensure_admin();
+        ) -> Result<(), AnalyticsError> {
+            self.ensure_admin()?;
             self.benchmark_indices
                 .insert(property_type, &performance_change_percentage);
+            Ok(())
         }
 
         /// Get the stored benchmark index for a property type.
@@ -553,13 +618,15 @@ mod propchain_analytics {
             self.admin
         }
 
-        /// Ensure only the admin can modify metrics
-        fn ensure_admin(&self) {
-            assert_eq!(
-                self.env().caller(),
-                self.admin,
-                "Unauthorized: Analytics admin only"
-            );
+        /// Ensure only the admin can modify metrics.
+        ///
+        /// Returns a typed [`AnalyticsError::Unauthorized`] instead of
+        /// panicking so integrators can distinguish authorization failures.
+        fn ensure_admin(&self) -> Result<(), AnalyticsError> {
+            if self.env().caller() != self.admin {
+                return Err(AnalyticsError::Unauthorized);
+            }
+            Ok(())
         }
 
         // ── Admin Key Rotation (Issue #496) ──────────────────────────────────
@@ -668,6 +735,161 @@ mod propchain_analytics {
         #[ink(message)]
         pub fn get_pending_admin_rotation(&self) -> Option<propchain_traits::KeyRotationRequest> {
             self.pending_admin_rotation.clone()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn trend(price: i32, volume: i32) -> MarketTrend {
+            MarketTrend {
+                period_start: 0,
+                period_end: 100,
+                price_change_percentage: price,
+                volume_change_percentage: volume,
+            }
+        }
+
+        /// Insights must be derived from report data, not hardcoded:
+        /// materially different market states produce different text.
+        #[ink::test]
+        fn insights_differ_between_market_states() {
+            let mut bullish = AnalyticsDashboard::new();
+            bullish.add_market_trend(trend(5, 10));
+            bullish.update_market_sentiment(1, 800, 200);
+            let bull_report = bullish.generate_market_report();
+            assert!(bull_report.insights.contains("upward"));
+            assert!(bull_report.insights.contains("increasing"));
+            assert!(bull_report.insights.contains("bullish"));
+
+            let mut bearish = AnalyticsDashboard::new();
+            bearish.add_market_trend(trend(-7, -3));
+            bearish.update_market_sentiment(1, 150, 850);
+            let bear_report = bearish.generate_market_report();
+            assert!(bear_report.insights.contains("downward"));
+            assert!(bear_report.insights.contains("decreasing"));
+            assert!(bear_report.insights.contains("bearish"));
+            assert_ne!(bull_report.insights, bear_report.insights);
+        }
+
+        #[ink::test]
+        fn insights_without_data_mention_stability_and_missing_sentiment() {
+            let contract = AnalyticsDashboard::new();
+            let report = contract.generate_market_report();
+            assert!(report.insights.contains("stable"));
+            assert!(report.insights.contains("no crowd sentiment data"));
+        }
+
+        type Environment = ink::env::DefaultEnvironment;
+
+        fn accounts() -> ink::env::test::DefaultAccounts<Environment> {
+            ink::env::test::default_accounts::<Environment>()
+        }
+
+        fn set_caller(caller: AccountId) {
+            ink::env::test::set_caller::<Environment>(caller);
+        }
+
+        fn sample_trend() -> MarketTrend {
+            MarketTrend {
+                period_start: 1_000,
+                period_end: 2_000,
+                price_change_percentage: 5,
+                volume_change_percentage: 10,
+            }
+        }
+
+        fn admin_contract() -> AnalyticsDashboard {
+            AnalyticsDashboard::new()
+        }
+
+        #[ink::test]
+        fn unauthorized_update_market_metrics_gets_typed_error() {
+            let accounts = accounts();
+            let mut c = admin_contract();
+            set_caller(accounts.bob);
+            assert_eq!(c.update_market_metrics(100, 200, 3), Err(AnalyticsError::Unauthorized));
+        }
+
+        #[ink::test]
+        fn unauthorized_batch_update_metrics_gets_typed_error() {
+            let accounts = accounts();
+            let mut c = admin_contract();
+            set_caller(accounts.bob);
+            assert_eq!(c.batch_update_metrics(Vec::new()), Err(AnalyticsError::Unauthorized));
+        }
+
+        #[ink::test]
+        fn unauthorized_batch_add_trends_gets_typed_error() {
+            let accounts = accounts();
+            let mut c = admin_contract();
+            set_caller(accounts.bob);
+            assert_eq!(c.batch_add_trends(Vec::new()), Err(AnalyticsError::Unauthorized));
+        }
+
+        #[ink::test]
+        fn unauthorized_add_market_trend_gets_typed_error() {
+            let accounts = accounts();
+            let mut c = admin_contract();
+            set_caller(accounts.bob);
+            assert_eq!(c.add_market_trend(sample_trend()), Err(AnalyticsError::Unauthorized));
+            assert_eq!(c.get_historical_trends().len(), 0);
+        }
+
+        #[ink::test]
+        fn unauthorized_update_market_sentiment_gets_typed_error() {
+            let accounts = accounts();
+            let mut c = admin_contract();
+            set_caller(accounts.bob);
+            assert_eq!(c.update_market_sentiment(1, 100, 100), Err(AnalyticsError::Unauthorized));
+        }
+
+        #[ink::test]
+        fn unauthorized_set_portfolio_positions_gets_typed_error() {
+            let accounts = accounts();
+            let mut c = admin_contract();
+            set_caller(accounts.bob);
+            assert_eq!(c.set_portfolio_positions(accounts.alice, Vec::new()), Err(AnalyticsError::Unauthorized));
+        }
+
+        #[ink::test]
+        fn unauthorized_update_property_type_trend_gets_typed_error() {
+            let accounts = accounts();
+            let mut c = admin_contract();
+            set_caller(accounts.bob);
+            assert_eq!(c.update_property_type_trend(propchain_traits::PropertyType::Residential, sample_trend()), Err(AnalyticsError::Unauthorized));
+        }
+
+        #[ink::test]
+        fn unauthorized_update_benchmark_index_gets_typed_error() {
+            let accounts = accounts();
+            let mut c = admin_contract();
+            set_caller(accounts.bob);
+            assert_eq!(c.update_benchmark_index(propchain_traits::PropertyType::Residential, 7), Err(AnalyticsError::Unauthorized));
+        }
+
+        #[ink::test]
+        fn admin_succeeds_on_all_gated_messages() {
+            let accounts = accounts();
+            let mut c = admin_contract();
+            assert_eq!(c.update_market_metrics(150, 300, 4), Ok(()));
+            assert_eq!(c.get_market_metrics().average_price, 150);
+            assert_eq!(c.add_market_trend(sample_trend()), Ok(()));
+            assert_eq!(c.get_historical_trends().len(), 1);
+            assert_eq!(c.batch_update_metrics(vec![MetricUpdate { average_price: 160, total_volume: 320, properties_listed: 5 }]), Ok(()));
+            assert_eq!(c.batch_add_trends(vec![sample_trend()]), Ok(()));
+            assert_eq!(c.get_historical_trends().len(), 2);
+            assert_eq!(c.update_market_sentiment(1, 400, 100), Ok(()));
+            assert_eq!(c.overall_sentiment.bull_volume, 400);
+            let positions = vec![PortfolioPosition { property_type: propchain_traits::PropertyType::Residential, value: 1_000 }];
+            assert_eq!(c.set_portfolio_positions(accounts.alice, positions), Ok(()));
+            assert_eq!(c.get_portfolio_positions(accounts.alice).len(), 1);
+            assert_eq!(c.update_property_type_trend(propchain_traits::PropertyType::Commercial, sample_trend()), Ok(()));
+            assert_eq!(c.get_property_type_trend(propchain_traits::PropertyType::Commercial).price_change_percentage, 5);
+            assert_eq!(c.update_benchmark_index(propchain_traits::PropertyType::Commercial, 9), Ok(()));
+            assert_eq!(c.get_benchmark_index(propchain_traits::PropertyType::Commercial), 9);
+        }
         }
     }
 }

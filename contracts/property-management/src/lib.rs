@@ -7,7 +7,7 @@ use ink::storage::Mapping;
 use propchain_traits::{non_reentrant, ComplianceChecker, ReentrancyError, ReentrancyGuard};
 
 #[ink::contract]
-mod property_management {
+pub mod property_management {
     use super::*;
 
     pub type TokenId = u64;
@@ -461,6 +461,7 @@ mod property_management {
 
     impl PropertyManagement {
         #[ink(constructor)]
+        #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             let caller = Self::env().caller();
             Self {
@@ -497,11 +498,19 @@ mod property_management {
             }
         }
 
+        /// Returns the admin account address of this contract.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None.
         #[ink(message)]
         pub fn admin(&self) -> AccountId {
             self.admin
         }
 
+        /// Sets the account that receives management fees collected from rent payments.
+        ///
+        /// - **Caller**: Admin only.
+        /// - **Errors**: `Unauthorized` if caller is not the admin.
         #[ink(message)]
         pub fn set_fee_beneficiary(&mut self, beneficiary: AccountId) -> Result<(), Error> {
             self.ensure_admin()?;
@@ -509,6 +518,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Sets or clears the compliance registry contract address used for tenant KYC checks.
+        ///
+        /// - **Caller**: Admin only.
+        /// - **Errors**: `Unauthorized` if caller is not the admin.
         #[ink(message)]
         pub fn set_compliance_registry(
             &mut self,
@@ -527,6 +540,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Grants manager privileges to the given account, allowing it to perform admin-level operations.
+        ///
+        /// - **Caller**: Admin only.
+        /// - **Errors**: `Unauthorized` if caller is not the admin.
         #[ink(message)]
         pub fn add_manager(&mut self, account: AccountId) -> Result<(), Error> {
             self.ensure_admin()?;
@@ -534,6 +551,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Revokes manager privileges from the given account.
+        ///
+        /// - **Caller**: Admin only.
+        /// - **Errors**: `Unauthorized` if caller is not the admin.
         #[ink(message)]
         pub fn remove_manager(&mut self, account: AccountId) -> Result<(), Error> {
             self.ensure_admin()?;
@@ -541,6 +562,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Checks whether the given account currently holds manager privileges.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns `false` for non-managers).
         #[ink(message)]
         pub fn is_manager(&self, account: AccountId) -> bool {
             self.managers.get(account).unwrap_or(false)
@@ -565,6 +590,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Retrieves the jurisdiction compliance configuration for a given property token.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns `None` if not configured).
         #[ink(message)]
         pub fn get_jurisdiction_compliance(
             &self,
@@ -639,6 +668,10 @@ mod property_management {
             })
         }
 
+        /// Retrieves lease details by its ID.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns `None` if lease does not exist).
         #[ink(message)]
         pub fn get_lease(&self, lease_id: u64) -> Option<Lease> {
             self.leases.get(lease_id)
@@ -686,6 +719,10 @@ mod property_management {
             })
         }
 
+        /// Terminates an active lease, setting its status to `Ended`.
+        ///
+        /// - **Caller**: Landlord, admin, or manager.
+        /// - **Errors**: `NotFound`, `NotLandlordOrManager`, `InvalidStatus` if lease is not active.
         #[ink(message)]
         pub fn end_lease(&mut self, lease_id: u64) -> Result<(), Error> {
             let mut lease = self.leases.get(lease_id).ok_or(Error::NotFound)?;
@@ -702,6 +739,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Submits a new maintenance request for a property, with title and description hash.
+        ///
+        /// - **Caller**: Any compliant account.
+        /// - **Errors**: `NotCompliant` if caller fails compliance check; re-entrant calls return `ReentrantCall`.
         #[ink(message)]
         pub fn submit_maintenance_request(
             &mut self,
@@ -741,6 +782,10 @@ mod property_management {
             })
         }
 
+        /// Updates the status of a maintenance request and optionally assigns it to an account.
+        ///
+        /// - **Caller**: Admin or manager.
+        /// - **Errors**: `Unauthorized`, `MaintenanceNotFound`, `InvalidStatus`.
         #[ink(message)]
         pub fn update_maintenance_status(
             &mut self,
@@ -786,6 +831,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Marks a maintenance request as resolved with the given resolution hash.
+        ///
+        /// - **Caller**: Admin or manager.
+        /// - **Errors**: `Unauthorized`, `MaintenanceNotFound`.
         #[ink(message)]
         pub fn resolve_maintenance(
             &mut self,
@@ -822,6 +871,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Retrieves a maintenance request by its ID.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns `None` if not found).
         #[ink(message)]
         pub fn get_maintenance(&self, request_id: u64) -> Option<MaintenanceRequest> {
             self.maintenance.get(request_id)
@@ -859,6 +912,10 @@ mod property_management {
             })
         }
 
+        /// Reviews a pending tenant screening application, approving or rejecting it.
+        ///
+        /// - **Caller**: Admin or manager.
+        /// - **Errors**: `Unauthorized`, `ScreeningNotFound`, `InvalidStatus` if screening is not pending.
         #[ink(message)]
         pub fn review_screening(&mut self, screening_id: u64, approve: bool) -> Result<(), Error> {
             self.ensure_manager_or_admin()?;
@@ -891,11 +948,19 @@ mod property_management {
             Ok(())
         }
 
+        /// Retrieves a tenant screening record by its ID.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns `None` if not found).
         #[ink(message)]
         pub fn get_screening(&self, screening_id: u64) -> Option<TenantScreening> {
             self.screenings.get(screening_id)
         }
 
+        /// Records a new property expense with a category, amount, vendor, and description hash.
+        ///
+        /// - **Caller**: Admin or manager.
+        /// - **Errors**: `Unauthorized`, `InvalidAmount` if amount is zero.
         #[ink(message)]
         pub fn record_expense(
             &mut self,
@@ -971,6 +1036,10 @@ mod property_management {
             })
         }
 
+        /// Deposits native tokens into the contract's operating float for paying expenses.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (transferred value is simply accumulated).
         #[ink(message, payable)]
         pub fn fund_operating_float(&mut self) -> Result<(), Error> {
             let v = self.env().transferred_value();
@@ -978,21 +1047,37 @@ mod property_management {
             Ok(())
         }
 
+        /// Returns the current balance of the operating float held by the contract.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None.
         #[ink(message)]
         pub fn operating_float_balance(&self) -> Balance {
             self.operating_float
         }
 
+        /// Returns the total native balance currently locked in dispute escrows.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None.
         #[ink(message)]
         pub fn dispute_escrow_locked_balance(&self) -> Balance {
             self.dispute_escrow_locked
         }
 
+        /// Retrieves an expense record by its ID.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns `None` if not found).
         #[ink(message)]
         pub fn get_expense(&self, expense_id: u64) -> Option<Expense> {
             self.expenses.get(expense_id)
         }
 
+        /// Schedules a property inspection for the given token with a designated inspector and timestamp.
+        ///
+        /// - **Caller**: Admin or manager.
+        /// - **Errors**: `Unauthorized`.
         #[ink(message)]
         pub fn schedule_inspection(
             &mut self,
@@ -1018,6 +1103,10 @@ mod property_management {
             Ok(id)
         }
 
+        /// Completes a scheduled inspection, recording the report hash and pass/fail result.
+        ///
+        /// - **Caller**: Assigned inspector, admin, or manager.
+        /// - **Errors**: `Unauthorized`, `InspectionNotFound`, `InvalidStatus` if not scheduled.
         #[ink(message)]
         pub fn complete_inspection(
             &mut self,
@@ -1051,6 +1140,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Retrieves an inspection record by its ID.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns `None` if not found).
         #[ink(message)]
         pub fn get_inspection(&self, inspection_id: u64) -> Option<Inspection> {
             self.inspections.get(inspection_id)
@@ -1094,6 +1187,10 @@ mod property_management {
             })
         }
 
+        /// Allows the respondent to match the initiator's stake in an open dispute, moving it to `Open` status.
+        ///
+        /// - **Caller**: The dispute respondent only.
+        /// - **Errors**: `DisputeNotFound`, `RespondentMismatch`, `InvalidStatus`, `InvalidAmount` if stake does not match initiator's.
         #[ink(message, payable)]
         pub fn counterparty_stake_dispute(&mut self, dispute_id: u64) -> Result<(), Error> {
             let mut d = self
@@ -1164,11 +1261,19 @@ mod property_management {
             })
         }
 
+        /// Retrieves a dispute case by its ID.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns `None` if not found).
         #[ink(message)]
         pub fn get_dispute(&self, dispute_id: u64) -> Option<DisputeCase> {
             self.disputes.get(dispute_id)
         }
 
+        /// Returns aggregated analytics for a property token (rent, maintenance, expenses, etc.).
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns zeroed-out defaults if no data exists).
         #[ink(message)]
         pub fn get_property_analytics(&self, token_id: TokenId) -> PropertyAnalytics {
             self.analytics_for(token_id)
@@ -1186,6 +1291,10 @@ mod property_management {
             }
         }
 
+        /// Creates a new governance proposal with zero initial votes.
+        ///
+        /// - **Caller**: Admin or manager.
+        /// - **Errors**: `Unauthorized`.
         #[ink(message)]
         pub fn create_proposal(&mut self) -> Result<u64, Error> {
             self.ensure_manager_or_admin()?;
@@ -1199,6 +1308,10 @@ mod property_management {
             Ok(self.proposal_counter)
         }
 
+        /// Casts a vote (for or against) on an existing proposal.
+        ///
+        /// - **Caller**: Any account (one vote per account per proposal).
+        /// - **Errors**: `InvalidStatus` if caller has already voted on this proposal.
         #[ink(message)]
         pub fn vote(&mut self, proposal_id: u64, support: bool) -> Result<(), Error> {
             let voter = self.env().caller();
@@ -1227,6 +1340,10 @@ mod property_management {
             Ok(())
         }
 
+        /// Retrieves a governance proposal by its ID, including vote tallies.
+        ///
+        /// - **Caller**: Anyone.
+        /// - **Errors**: None (returns `None` if not found).
         #[ink(message)]
         pub fn get_proposal(&self, proposal_id: u64) -> Option<Proposal> {
             self.proposals.get(proposal_id)
@@ -1560,7 +1677,106 @@ mod property_management {
             assert!(a.rent_collected >= 2000);
             assert!(a.maintenance_resolved >= 1);
         }
+
+        // ── Issue #991: rent exactness and dispute escrow coverage ────────
+
+        /// `pay_rent` must accept only the tenant paying exactly
+        /// `rent_per_period`: under- and over-payment are rejected, and a
+        /// non-tenant can never pay.
+        #[ink::test]
+        fn pay_rent_enforces_exact_amount_and_tenant_gate() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            let mut pm = setup();
+            let lease_id = pm
+                .create_lease(1, accounts.bob, accounts.alice, 1000, 86_400, 500, 0, 0)
+                .expect("lease");
+
+            // Non-tenant (charlie) is rejected even with the exact amount.
+            test::set_caller::<DefaultEnvironment>(accounts.charlie);
+            test::set_value_transferred::<DefaultEnvironment>(1000);
+            assert_eq!(pm.pay_rent(lease_id), Err(Error::NotTenant));
+
+            // Tenant underpayment rejected.
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            test::set_value_transferred::<DefaultEnvironment>(999);
+            assert_eq!(pm.pay_rent(lease_id), Err(Error::InvalidAmount));
+
+            // Tenant overpayment rejected.
+            test::set_value_transferred::<DefaultEnvironment>(1001);
+            assert_eq!(pm.pay_rent(lease_id), Err(Error::InvalidAmount));
+
+            // Rejected attempts collected nothing.
+            assert_eq!(pm.get_management_dashboard().total_rent_collected, 0);
+
+            // Exact amount from the tenant succeeds and advances the schedule.
+            test::set_value_transferred::<DefaultEnvironment>(1000);
+            pm.pay_rent(lease_id).expect("exact rent");
+            let lease = pm.get_lease(lease_id).expect("lease exists");
+            assert_eq!(lease.next_due, 86_400);
+            assert_eq!(pm.get_management_dashboard().total_rent_collected, 1000);
+
+            // Rent on an ended lease is rejected.
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            pm.end_lease(lease_id).expect("end");
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            test::set_value_transferred::<DefaultEnvironment>(1000);
+            assert_eq!(pm.pay_rent(lease_id), Err(Error::LeaseNotActive));
+        }
+
+        /// Dispute staking locks escrow at each step and releases it exactly
+        /// once on resolution; mismatched respondents/amounts are rejected.
+        #[ink::test]
+        fn dispute_staking_locks_and_releases_escrow() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            let mut pm = setup();
+            assert_eq!(pm.dispute_escrow_locked_balance(), 0);
+
+            // Initiator opens with a 100 stake.
+            test::set_value_transferred::<DefaultEnvironment>(100);
+            let did = pm
+                .open_dispute(1, accounts.bob, Hash::from([5u8; 32]))
+                .expect("open");
+            assert_eq!(pm.dispute_escrow_locked_balance(), 100);
+
+            // A non-respondent cannot stake.
+            test::set_caller::<DefaultEnvironment>(accounts.charlie);
+            test::set_value_transferred::<DefaultEnvironment>(100);
+            assert_eq!(
+                pm.counterparty_stake_dispute(did),
+                Err(Error::RespondentMismatch)
+            );
+
+            // The respondent must match the initiator's stake exactly.
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            test::set_value_transferred::<DefaultEnvironment>(99);
+            assert_eq!(
+                pm.counterparty_stake_dispute(did),
+                Err(Error::InvalidAmount)
+            );
+            // Failed stake attempts did not change escrow.
+            assert_eq!(pm.dispute_escrow_locked_balance(), 100);
+
+            // Matching stake completes the dispute as Open.
+            test::set_value_transferred::<DefaultEnvironment>(100);
+            pm.counterparty_stake_dispute(did).expect("counter");
+            assert_eq!(pm.dispute_escrow_locked_balance(), 200);
+            assert_eq!(pm.get_dispute(did).expect("d").status, DisputeStatus::Open);
+
+            // Resolution releases the whole escrow.
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            pm.resolve_dispute(did, Some(false)).expect("resolve");
+            assert_eq!(pm.dispute_escrow_locked_balance(), 0);
+            assert_eq!(
+                pm.get_dispute(did).expect("d").status,
+                DisputeStatus::ResolvedRespondent
+            );
+        }
     }
 }
 
-pub mod submodules;
+
+pub mod permit_module {
+    include!("permit.rs");
+}

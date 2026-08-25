@@ -810,5 +810,323 @@ mod propchain_metadata {
     // UNIT TESTS
     // ========================================================================
     #[cfg(test)]
-    mod tests {}
+    mod tests {
+        use ink::env::{test, DefaultEnvironment};
+
+        use super::*;
+
+        fn setup() -> AdvancedMetadataRegistry {
+            test::set_caller::<DefaultEnvironment>(
+                test::default_accounts::<DefaultEnvironment>().alice,
+            );
+            AdvancedMetadataRegistry::new()
+        }
+
+        fn sample_core() -> CoreMetadata {
+            CoreMetadata {
+                name: "Sunset Villa".into(),
+                location: "Lisbon, PT".into(),
+                size_sqm: 250,
+                property_type: MetadataPropertyType::Residential,
+                valuation: 750_000,
+                legal_description: "Freehold townhouse".into(),
+                coordinates: Some((38_722_3, -9_139_3)),
+                year_built: Some(2015),
+                bedrooms: Some(4),
+                bathrooms: Some(3),
+                zoning: None,
+            }
+        }
+
+        fn sample_ipfs() -> IpfsResources {
+            IpfsResources {
+                metadata_cid: Some(
+                    "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".into(),
+                ),
+                documents_cid: None,
+                images_cid: None,
+                legal_docs_cid: None,
+                virtual_tour_cid: None,
+                floor_plans_cid: None,
+            }
+        }
+
+        fn create_sample_metadata(contract: &mut AdvancedMetadataRegistry, property_id: u64) {
+            test::set_caller::<DefaultEnvironment>(
+                test::default_accounts::<DefaultEnvironment>().bob,
+            );
+            assert_eq!(
+                contract.create_metadata(
+                    property_id,
+                    sample_core(),
+                    sample_ipfs(),
+                    [1u8; 32].into()
+                ),
+                Ok(())
+            );
+        }
+
+        #[ink::test]
+        fn test_create_grants_ownership_and_rejects_duplicates() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+            create_sample_metadata(&mut contract, 1);
+
+            // Creator is recorded as owner and the metadata is queryable
+            let stored = contract.get_metadata(1).unwrap();
+            assert_eq!(stored.created_by, accounts.bob);
+            assert_eq!(stored.version, 1);
+            assert!(!stored.is_finalized);
+            assert_eq!(contract.current_version(1), Some(1));
+            assert_eq!(contract.total_properties(), 1);
+
+            // A second create for the same property is rejected
+            assert_eq!(
+                contract.create_metadata(1, sample_core(), sample_ipfs(), [2u8; 32].into()),
+                Err(Error::InvalidMetadata)
+            );
+
+            // Missing required fields are rejected
+            let mut invalid = sample_core();
+            invalid.name = String::new();
+            assert_eq!(
+                contract.create_metadata(2, invalid, sample_ipfs(), [3u8; 32].into()),
+                Err(Error::RequiredFieldMissing)
+            );
+        }
+
+        #[ink::test]
+        fn test_non_owner_update_rejected_and_owner_update_versions() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+            create_sample_metadata(&mut contract, 1);
+
+            // A non-owner may not update
+            test::set_caller::<DefaultEnvironment>(accounts.eve);
+            assert_eq!(
+                contract.update_metadata(
+                    1,
+                    sample_core(),
+                    sample_ipfs(),
+                    [9u8; 32].into(),
+                    "hostile edit".into(),
+                    None
+                ),
+                Err(Error::Unauthorized)
+            );
+
+            // The owner bumps the version with a change description
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            assert_eq!(
+                contract.update_metadata(
+                    1,
+                    sample_core(),
+                    sample_ipfs(),
+                    [7u8; 32].into(),
+                    "renovation".into(),
+                    Some("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".into())
+                ),
+                Ok(2)
+            );
+
+            let history = contract.get_version_history(1);
+            assert_eq!(history.len(), 2);
+            assert_eq!(history[0].version, 1);
+            assert_eq!(history[1].version, 2);
+            assert_eq!(history[1].change_description, "renovation");
+            assert_eq!(contract.current_version(1), Some(2));
+
+            // Unknown properties have no history
+            assert!(contract.get_version_history(99).is_empty());
+        }
+
+        #[ink::test]
+        fn test_finalize_once_then_writes_rejected() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+            create_sample_metadata(&mut contract, 1);
+
+            // Only owner/admin can finalize
+            test::set_caller::<DefaultEnvironment>(accounts.eve);
+            assert_eq!(contract.finalize_metadata(1), Err(Error::Unauthorized));
+
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            assert_eq!(contract.finalize_metadata(1), Ok(()));
+            assert!(contract.get_metadata(1).unwrap().is_finalized);
+
+            // Finalizing again is rejected
+            assert_eq!(
+                contract.finalize_metadata(1),
+                Err(Error::MetadataAlreadyFinalized)
+            );
+
+            // All mutating paths are closed after finalization
+            assert_eq!(
+                contract.update_metadata(
+                    1,
+                    sample_core(),
+                    sample_ipfs(),
+                    [5u8; 32].into(),
+                    "x".into(),
+                    None
+                ),
+                Err(Error::MetadataAlreadyFinalized)
+            );
+            assert_eq!(
+                contract.add_custom_attribute(
+                    1,
+                    "key".into(),
+                    MetadataValue::Text("v".into()),
+                    false
+                ),
+                Err(Error::MetadataAlreadyFinalized)
+            );
+            assert_eq!(
+                contract.add_media_item(
+                    1,
+                    0,
+                    "ipfs://img".into(),
+                    "photo".into(),
+                    "image/png".into(),
+                    100,
+                    [6u8; 32].into()
+                ),
+                Err(Error::MetadataAlreadyFinalized)
+            );
+        }
+
+        #[ink::test]
+        fn test_media_limit_enforced_per_category() {
+            let mut contract = setup();
+            create_sample_metadata(&mut contract, 1);
+
+            // Shrink the per-category limit to one for easy testing
+            test::set_caller::<DefaultEnvironment>(
+                test::default_accounts::<DefaultEnvironment>().alice,
+            );
+            assert_eq!(contract.update_limits(50, 1, 50), Ok(()));
+            test::set_caller::<DefaultEnvironment>(
+                test::default_accounts::<DefaultEnvironment>().bob,
+            );
+
+            assert_eq!(
+                contract.add_media_item(
+                    1,
+                    0,
+                    "ipfs://img-1".into(),
+                    "front".into(),
+                    "image/png".into(),
+                    10,
+                    [1u8; 32].into()
+                ),
+                Ok(())
+            );
+            // Second image hits the limit; other categories are unaffected
+            assert_eq!(
+                contract.add_media_item(
+                    1,
+                    0,
+                    "ipfs://img-2".into(),
+                    "back".into(),
+                    "image/png".into(),
+                    10,
+                    [2u8; 32].into()
+                ),
+                Err(Error::SizeLimitExceeded)
+            );
+            assert_eq!(
+                contract.add_media_item(
+                    1,
+                    3,
+                    "ipfs://plan-1".into(),
+                    "plan".into(),
+                    "image/svg".into(),
+                    20,
+                    [3u8; 32].into()
+                ),
+                Ok(())
+            );
+
+            // Invalid category code is rejected
+            assert_eq!(
+                contract.add_media_item(
+                    1,
+                    9,
+                    "ipfs://x".into(),
+                    "?".into(),
+                    "application/octet-stream".into(),
+                    1,
+                    [4u8; 32].into()
+                ),
+                Err(Error::InvalidMetadata)
+            );
+
+            let media = contract.get_multimedia(1).unwrap();
+            assert_eq!(media.images.len(), 1);
+            assert_eq!(media.floor_plans.len(), 1);
+            assert!(media.videos.is_empty());
+        }
+
+        #[ink::test]
+        fn test_legal_document_verify_by_verifier_only() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+            create_sample_metadata(&mut contract, 1);
+
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            let document_id = contract
+                .add_legal_document(
+                    1,
+                    LegalDocType::Deed,
+                    "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".into(),
+                    [8u8; 32].into(),
+                    "Registry Office".into(),
+                    0,
+                    None,
+                )
+                .unwrap();
+
+            // Documents start unverified and cannot be verified by random users
+            let docs = contract.get_legal_documents(1);
+            assert_eq!(docs.len(), 1);
+            assert!(!docs[0].is_verified);
+            test::set_caller::<DefaultEnvironment>(accounts.eve);
+            assert_eq!(
+                contract.verify_legal_document(1, document_id),
+                Err(Error::Unauthorized)
+            );
+
+            // Admin can verify directly...
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            assert_eq!(contract.verify_legal_document(1, document_id), Ok(()));
+            assert!(contract.get_legal_documents(1)[0].is_verified);
+
+            // ...and a registered verifier can too
+            let mut second = setup();
+            create_sample_metadata(&mut second, 2);
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            let doc2 = second
+                .add_legal_document(
+                    2,
+                    LegalDocType::Title,
+                    "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".into(),
+                    [9u8; 32].into(),
+                    "Notary".into(),
+                    0,
+                    None,
+                )
+                .unwrap();
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            second.add_verifier(accounts.charlie).unwrap();
+            test::set_caller::<DefaultEnvironment>(accounts.charlie);
+            assert_eq!(second.verify_legal_document(2, doc2), Ok(()));
+            assert!(second.get_legal_documents(2)[0].verified_by == Some(accounts.charlie));
+
+            // Unknown document ids are rejected
+            assert_eq!(
+                contract.verify_legal_document(1, 999),
+                Err(Error::DocumentNotFound)
+            );
+        }
+    }
 }

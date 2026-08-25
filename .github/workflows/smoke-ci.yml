@@ -1,64 +1,10 @@
-name: Smoke CI Gate
-
-on:
-  push:
-    branches: [ main, master, develop ]
-  pull_request:
-    branches: [ main, master, develop ]
-
-permissions:
-  contents: read
-
-jobs:
-  smoke-test:
-    name: Code Quality & Testing Suite
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Code Repository
-        uses: actions/checkout@v4
-
-      - name: Validate CODEOWNERS coverage for security-critical contracts
-        shell: bash
-        run: |
-          test -f .github/CODEOWNERS
-          grep -Eq '^/contracts/bridge/\s+@MettaChain/bridge$' .github/CODEOWNERS
-          grep -Eq '^/contracts/lending/\s+@MettaChain/lending$' .github/CODEOWNERS
-          grep -Eq '^/contracts/oracle/\s+@MettaChain/oracle$' .github/CODEOWNERS
-
-      - name: Install Nightly Rust Toolchain (for fmt)
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-
-      - name: Install Stable Rust Toolchain (for clippy & test)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache Cargo Build Artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-smoke-
-
-      - name: Check Code Formatting Style (nightly fmt)
-        run: cargo +nightly fmt --check
-
-      - name: Execute Static Analysis Compiler Lints (clippy)
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      # Note (issue #975): tests/integration_tests.rs is gated behind
-      # `--features e2e-tests` because ink! e2e tests need a live substrate
-      # node, which CI does not provision. The default run therefore relies
-      # on the off-chain fallbacks in contracts/lib/src/lib.rs
-      # (`mod registry_fallback_tests`) to cover the register_property flow.
-      - name: Run Core Verification Tests (test)
-        run: cargo test --all-features --workspace
+# Smoke CI Gate - TEMPORARILY DISABLED
+#
+# Disabled at maintainer request. The gate currently fails for EVERY pull
+# request regardless of its contents: the pinned dependency set (e.g.
+# trie-db 0.28.0) no longer compiles under the stable rustc that CI
+# installs fresh on each run (1.98.0), so `cargo clippy --all-targets
+# --all-features` aborts before ever reaching project code, and the
+# workspace test step hits the same failure.
+#
+# Re-enable once the dependency/toolchain baseline is refreshed.

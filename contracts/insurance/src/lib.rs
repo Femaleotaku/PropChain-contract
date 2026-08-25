@@ -25,7 +25,7 @@ mod fraud_detection;
 
 /// Decentralized Property Insurance Platform
 #[ink::contract]
-mod propchain_insurance {
+pub mod propchain_insurance {
     use ink::prelude::string::String;
     use ink::prelude::vec::Vec;
     use propchain_traits::{non_reentrant, ReentrancyError, ReentrancyGuard};
@@ -641,56 +641,61 @@ mod propchain_insurance {
             Ok(pool_id)
         }
 
-        /// Provide liquidity to a pool
+        /// Provide liquidity to a pool.
+        ///
+        /// The caller must attach native tokens as the liquidity deposit.
+        /// Wrapped in a reentrancy guard to prevent reentrant value-receive attacks.
         #[ink(message, payable)]
         pub fn provide_pool_liquidity(&mut self, pool_id: u64) -> Result<(), InsuranceError> {
-            let caller = self.env().caller();
-            let amount = self.env().transferred_value();
+            non_reentrant!(self, {
+                let caller = self.env().caller();
+                let amount = self.env().transferred_value();
 
-            let mut pool = self
-                .pools
-                .get(&pool_id)
-                .ok_or(InsuranceError::PoolNotFound)?;
-            if !pool.is_active {
-                return Err(InsuranceError::PoolNotFound);
-            }
+                let mut pool = self
+                    .pools
+                    .get(&pool_id)
+                    .ok_or(InsuranceError::PoolNotFound)?;
+                if !pool.is_active {
+                    return Err(InsuranceError::PoolNotFound);
+                }
 
-            pool.total_capital += amount;
-            pool.available_capital += amount;
-            self.pools.insert(&pool_id, &pool);
+                pool.total_capital += amount;
+                pool.available_capital += amount;
+                self.pools.insert(&pool_id, &pool);
 
-            // Update liquidity provider record
-            let key = (pool_id, caller);
-            let mut provider =
-                self.liquidity_providers
-                    .get(&key)
-                    .unwrap_or(PoolLiquidityProvider {
-                        provider: caller,
-                        pool_id,
-                        deposited_amount: 0,
-                        share_percentage: 0,
-                        deposited_at: self.env().block_timestamp(),
-                        last_reward_claim: self.env().block_timestamp(),
-                        accumulated_rewards: 0,
-                    });
-            provider.deposited_amount += amount;
-            self.liquidity_providers.insert(&key, &provider);
+                // Update liquidity provider record
+                let key = (pool_id, caller);
+                let mut provider =
+                    self.liquidity_providers
+                        .get(&key)
+                        .unwrap_or(PoolLiquidityProvider {
+                            provider: caller,
+                            pool_id,
+                            deposited_amount: 0,
+                            share_percentage: 0,
+                            deposited_at: self.env().block_timestamp(),
+                            last_reward_claim: self.env().block_timestamp(),
+                            accumulated_rewards: 0,
+                        });
+                provider.deposited_amount += amount;
+                self.liquidity_providers.insert(&key, &provider);
 
-            // Track providers per pool
-            let mut providers = self.pool_providers.get(&pool_id).unwrap_or_default();
-            if !providers.contains(&caller) {
-                providers.push(caller);
-                self.pool_providers.insert(&pool_id, &providers);
-            }
+                // Track providers per pool
+                let mut providers = self.pool_providers.get(&pool_id).unwrap_or_default();
+                if !providers.contains(&caller) {
+                    providers.push(caller);
+                    self.pool_providers.insert(&pool_id, &providers);
+                }
 
-            self.env().emit_event(PoolCapitalized {
-                pool_id,
-                provider: caller,
-                amount,
-                timestamp: self.env().block_timestamp(),
-            });
+                self.env().emit_event(PoolCapitalized {
+                    pool_id,
+                    provider: caller,
+                    amount,
+                    timestamp: self.env().block_timestamp(),
+                });
 
-            Ok(())
+                Ok(())
+            })
         }
 
         // =====================================================================
@@ -809,7 +814,10 @@ mod propchain_insurance {
         // POLICY MANAGEMENT
         // =====================================================================
 
-        /// Create an insurance policy (policyholder pays premium)
+        /// Create an insurance policy (policyholder pays premium).
+        ///
+        /// The caller must attach native tokens equal to or exceeding the
+        /// calculated annual premium. Wrapped in a reentrancy guard.
         #[ink(message, payable)]
         pub fn create_policy(
             &mut self,
@@ -820,103 +828,105 @@ mod propchain_insurance {
             duration_seconds: u64,
             metadata_url: String,
         ) -> Result<u64, InsuranceError> {
-            let caller = self.env().caller();
-            let paid = self.env().transferred_value();
-            let now = self.env().block_timestamp();
+            non_reentrant!(self, {
+                let caller = self.env().caller();
+                let paid = self.env().transferred_value();
+                let now = self.env().block_timestamp();
 
-            // Validate pool
-            let mut pool = self
-                .pools
-                .get(&pool_id)
-                .ok_or(InsuranceError::PoolNotFound)?;
-            if !pool.is_active {
-                return Err(InsuranceError::PoolNotFound);
-            }
+                // Validate pool
+                let mut pool = self
+                    .pools
+                    .get(&pool_id)
+                    .ok_or(InsuranceError::PoolNotFound)?;
+                if !pool.is_active {
+                    return Err(InsuranceError::PoolNotFound);
+                }
 
-            // Check pool has enough capital for coverage
-            let max_exposure = pool
-                .available_capital
-                .saturating_mul(pool.max_coverage_ratio as u128)
-                / 10_000;
-            if coverage_amount > max_exposure {
-                return Err(InsuranceError::InsufficientPoolFunds);
-            }
+                // Check pool has enough capital for coverage
+                let max_exposure = pool
+                    .available_capital
+                    .saturating_mul(pool.max_coverage_ratio as u128)
+                    / 10_000;
+                if coverage_amount > max_exposure {
+                    return Err(InsuranceError::InsufficientPoolFunds);
+                }
 
-            // Get risk assessment
-            let assessment = self
-                .risk_assessments
-                .get(&property_id)
-                .ok_or(InsuranceError::PropertyNotInsurable)?;
+                // Get risk assessment
+                let assessment = self
+                    .risk_assessments
+                    .get(&property_id)
+                    .ok_or(InsuranceError::PropertyNotInsurable)?;
 
-            // Check assessment is still valid
-            if now > assessment.valid_until {
-                return Err(InsuranceError::PropertyNotInsurable);
-            }
+                // Check assessment is still valid
+                if now > assessment.valid_until {
+                    return Err(InsuranceError::PropertyNotInsurable);
+                }
 
-            // Calculate required premium
-            let calc =
-                self.calculate_premium(property_id, coverage_amount, coverage_type.clone())?;
-            if paid < calc.annual_premium {
-                return Err(InsuranceError::InsufficientPremium);
-            }
+                // Calculate required premium
+                let calc =
+                    self.calculate_premium(property_id, coverage_amount, coverage_type.clone())?;
+                if paid < calc.annual_premium {
+                    return Err(InsuranceError::InsufficientPremium);
+                }
 
-            // Platform fee
-            let fee = paid.saturating_mul(self.platform_fee_rate as u128) / 10_000;
-            let pool_share = paid.saturating_sub(fee);
+                // Platform fee
+                let fee = paid.saturating_mul(self.platform_fee_rate as u128) / 10_000;
+                let pool_share = paid.saturating_sub(fee);
 
-            // Update pool
-            pool.total_premiums_collected += pool_share;
-            pool.available_capital += pool_share;
-            pool.active_policies += 1;
-            self.pools.insert(&pool_id, &pool);
+                // Update pool
+                pool.total_premiums_collected += pool_share;
+                pool.available_capital += pool_share;
+                pool.active_policies += 1;
+                self.pools.insert(&pool_id, &pool);
 
-            // Create policy
-            let policy_id = self.policy_count + 1;
-            self.policy_count = policy_id;
+                // Create policy
+                let policy_id = self.policy_count + 1;
+                self.policy_count = policy_id;
 
-            let policy = InsurancePolicy {
-                policy_id,
-                property_id,
-                policyholder: caller,
-                coverage_type: coverage_type.clone(),
-                coverage_amount,
-                premium_amount: paid,
-                deductible: calc.deductible,
-                start_time: now,
-                end_time: now.saturating_add(duration_seconds),
-                status: PolicyStatus::Active,
-                risk_level: assessment.risk_level,
-                pool_id,
-                claims_count: 0,
-                total_claimed: 0,
-                metadata_url,
-            };
+                let policy = InsurancePolicy {
+                    policy_id,
+                    property_id,
+                    policyholder: caller,
+                    coverage_type: coverage_type.clone(),
+                    coverage_amount,
+                    premium_amount: paid,
+                    deductible: calc.deductible,
+                    start_time: now,
+                    end_time: now.saturating_add(duration_seconds),
+                    status: PolicyStatus::Active,
+                    risk_level: assessment.risk_level,
+                    pool_id,
+                    claims_count: 0,
+                    total_claimed: 0,
+                    metadata_url,
+                };
 
-            self.policies.insert(&policy_id, &policy);
+                self.policies.insert(&policy_id, &policy);
 
-            let mut ph_policies = self.policyholder_policies.get(&caller).unwrap_or_default();
-            ph_policies.push(policy_id);
-            self.policyholder_policies.insert(&caller, &ph_policies);
+                let mut ph_policies = self.policyholder_policies.get(&caller).unwrap_or_default();
+                ph_policies.push(policy_id);
+                self.policyholder_policies.insert(&caller, &ph_policies);
 
-            let mut prop_policies = self.property_policies.get(&property_id).unwrap_or_default();
-            prop_policies.push(policy_id);
-            self.property_policies.insert(&property_id, &prop_policies);
+                let mut prop_policies = self.property_policies.get(&property_id).unwrap_or_default();
+                prop_policies.push(policy_id);
+                self.property_policies.insert(&property_id, &prop_policies);
 
-            // Mint insurance token
-            self.internal_mint_token(policy_id, caller, coverage_amount)?;
+                // Mint insurance token
+                self.internal_mint_token(policy_id, caller, coverage_amount)?;
 
-            self.env().emit_event(PolicyCreated {
-                policy_id,
-                policyholder: caller,
-                property_id,
-                coverage_type,
-                coverage_amount,
-                premium_amount: paid,
-                start_time: now,
-                end_time: now.saturating_add(duration_seconds),
-            });
+                self.env().emit_event(PolicyCreated {
+                    policy_id,
+                    policyholder: caller,
+                    property_id,
+                    coverage_type,
+                    coverage_amount,
+                    premium_amount: paid,
+                    start_time: now,
+                    end_time: now.saturating_add(duration_seconds),
+                });
 
-            Ok(policy_id)
+                Ok(policy_id)
+            })
         }
 
         /// Cancel an active policy (policyholder or admin)
@@ -1697,66 +1707,71 @@ mod propchain_insurance {
             Ok(())
         }
 
-        /// Purchase an insurance token from the secondary market
+        /// Purchase an insurance token from the secondary market.
+        ///
+        /// The caller must attach native tokens equal to or exceeding the
+        /// listed price. Wrapped in a reentrancy guard.
         #[ink(message, payable)]
         pub fn purchase_token(&mut self, token_id: u64) -> Result<(), InsuranceError> {
-            let caller = self.env().caller();
-            let paid = self.env().transferred_value();
+            non_reentrant!(self, {
+                let caller = self.env().caller();
+                let paid = self.env().transferred_value();
 
-            let mut token = self
-                .insurance_tokens
-                .get(&token_id)
-                .ok_or(InsuranceError::TokenNotFound)?;
-            let price = token
-                .listed_price
-                .ok_or(InsuranceError::InvalidParameters)?;
+                let mut token = self
+                    .insurance_tokens
+                    .get(&token_id)
+                    .ok_or(InsuranceError::TokenNotFound)?;
+                let price = token
+                    .listed_price
+                    .ok_or(InsuranceError::InvalidParameters)?;
 
-            if paid < price {
-                return Err(InsuranceError::InsufficientPremium);
-            }
+                if paid < price {
+                    return Err(InsuranceError::InsufficientPremium);
+                }
 
-            let seller = token.owner;
-            let old_owner = seller;
+                let seller = token.owner;
+                let old_owner = seller;
 
-            // Transfer the policy to the buyer
-            let policy = self
-                .policies
-                .get(&token.policy_id)
-                .ok_or(InsuranceError::PolicyNotFound)?;
-            if policy.status != PolicyStatus::Active {
-                return Err(InsuranceError::PolicyInactive);
-            }
+                // Transfer the policy to the buyer
+                let policy = self
+                    .policies
+                    .get(&token.policy_id)
+                    .ok_or(InsuranceError::PolicyNotFound)?;
+                if policy.status != PolicyStatus::Active {
+                    return Err(InsuranceError::PolicyInactive);
+                }
 
-            // Update policy policyholder
-            let mut updated_policy = policy;
-            updated_policy.policyholder = caller;
-            self.policies.insert(&token.policy_id, &updated_policy);
+                // Update policy policyholder
+                let mut updated_policy = policy;
+                updated_policy.policyholder = caller;
+                self.policies.insert(&token.policy_id, &updated_policy);
 
-            // Update ownership tracking
-            let mut seller_policies = self.policyholder_policies.get(&seller).unwrap_or_default();
-            seller_policies.retain(|&p| p != token.policy_id);
-            self.policyholder_policies.insert(&seller, &seller_policies);
+                // Update ownership tracking
+                let mut seller_policies = self.policyholder_policies.get(&seller).unwrap_or_default();
+                seller_policies.retain(|&p| p != token.policy_id);
+                self.policyholder_policies.insert(&seller, &seller_policies);
 
-            let mut buyer_policies = self.policyholder_policies.get(&caller).unwrap_or_default();
-            buyer_policies.push(token.policy_id);
-            self.policyholder_policies.insert(&caller, &buyer_policies);
+                let mut buyer_policies = self.policyholder_policies.get(&caller).unwrap_or_default();
+                buyer_policies.push(token.policy_id);
+                self.policyholder_policies.insert(&caller, &buyer_policies);
 
-            // Update token
-            token.owner = caller;
-            token.listed_price = None;
-            self.insurance_tokens.insert(&token_id, &token);
+                // Update token
+                token.owner = caller;
+                token.listed_price = None;
+                self.insurance_tokens.insert(&token_id, &token);
 
-            // Remove from listings
-            self.token_listings.retain(|&t| t != token_id);
+                // Remove from listings
+                self.token_listings.retain(|&t| t != token_id);
 
-            self.env().emit_event(InsuranceTokenTransferred {
-                token_id,
-                from: old_owner,
-                to: caller,
-                price: paid,
-            });
+                self.env().emit_event(InsuranceTokenTransferred {
+                    token_id,
+                    from: old_owner,
+                    to: caller,
+                    price: paid,
+                });
 
-            Ok(())
+                Ok(())
+            })
         }
 
         // =====================================================================
@@ -1842,6 +1857,8 @@ mod propchain_insurance {
         /// submits a data point for `property_id` / `metric` that satisfies the
         /// trigger condition, the full `coverage_amount` is paid out automatically
         /// from the backing risk pool — no manual claims assessment required.
+        ///
+        /// Wrapped in a reentrancy guard.
         #[ink(message, payable)]
         pub fn create_parametric_policy(
             &mut self,
@@ -1853,84 +1870,86 @@ mod propchain_insurance {
             pool_id: u64,
             duration_seconds: u64,
         ) -> Result<u64, InsuranceError> {
-            let caller = self.env().caller();
-            let paid = self.env().transferred_value();
-            let now = self.env().block_timestamp();
+            non_reentrant!(self, {
+                let caller = self.env().caller();
+                let paid = self.env().transferred_value();
+                let now = self.env().block_timestamp();
 
-            if paid == 0 {
-                return Err(InsuranceError::InsufficientPremium);
-            }
+                if paid == 0 {
+                    return Err(InsuranceError::InsufficientPremium);
+                }
 
-            // Validate pool has enough capital
-            let mut pool = self
-                .pools
-                .get(&pool_id)
-                .ok_or(InsuranceError::PoolNotFound)?;
-            if !pool.is_active {
-                return Err(InsuranceError::PoolNotFound);
-            }
-            let max_exposure = pool
-                .available_capital
-                .saturating_mul(pool.max_coverage_ratio as u128)
-                / 10_000;
-            if coverage_amount > max_exposure {
-                return Err(InsuranceError::InsufficientPoolFunds);
-            }
+                // Validate pool has enough capital
+                let mut pool = self
+                    .pools
+                    .get(&pool_id)
+                    .ok_or(InsuranceError::PoolNotFound)?;
+                if !pool.is_active {
+                    return Err(InsuranceError::PoolNotFound);
+                }
+                let max_exposure = pool
+                    .available_capital
+                    .saturating_mul(pool.max_coverage_ratio as u128)
+                    / 10_000;
+                if coverage_amount > max_exposure {
+                    return Err(InsuranceError::InsufficientPoolFunds);
+                }
 
-            // Credit premium to pool
-            let fee = paid.saturating_mul(self.platform_fee_rate as u128) / 10_000;
-            let pool_share = paid.saturating_sub(fee);
-            pool.total_premiums_collected += pool_share;
-            pool.available_capital += pool_share;
-            pool.active_policies += 1;
-            self.pools.insert(&pool_id, &pool);
+                // Credit premium to pool
+                let fee = paid.saturating_mul(self.platform_fee_rate as u128) / 10_000;
+                let pool_share = paid.saturating_sub(fee);
+                pool.total_premiums_collected += pool_share;
+                pool.available_capital += pool_share;
+                pool.active_policies += 1;
+                self.pools.insert(&pool_id, &pool);
 
-            let policy_id = self.parametric_policy_count + 1;
-            self.parametric_policy_count = policy_id;
+                let policy_id = self.parametric_policy_count + 1;
+                self.parametric_policy_count = policy_id;
 
-            let policy = ParametricPolicy {
-                policy_id,
-                property_id,
-                policyholder: caller,
-                metric: metric.clone(),
-                trigger_threshold,
-                comparison,
-                coverage_amount,
-                premium_amount: paid,
-                pool_id,
-                start_time: now,
-                end_time: now.saturating_add(duration_seconds),
-                status: ParametricPolicyStatus::Active,
-            };
+                let policy = ParametricPolicy {
+                    policy_id,
+                    property_id,
+                    policyholder: caller,
+                    metric: metric.clone(),
+                    trigger_threshold,
+                    comparison,
+                    coverage_amount,
+                    premium_amount: paid,
+                    pool_id,
+                    start_time: now,
+                    end_time: now.saturating_add(duration_seconds),
+                    status: ParametricPolicyStatus::Active,
+                };
 
-            self.parametric_policies.insert(&policy_id, &policy);
+                self.parametric_policies.insert(&policy_id, &policy);
 
-            let mut prop_list = self
-                .property_parametric_policies
-                .get(&property_id)
-                .unwrap_or_default();
-            prop_list.push(policy_id);
-            self.property_parametric_policies
-                .insert(&property_id, &prop_list);
+                let mut prop_list = self
+                    .property_parametric_policies
+                    .get(&property_id)
+                    .unwrap_or_default();
+                prop_list.push(policy_id);
+                self.property_parametric_policies
+                    .insert(&property_id, &prop_list);
 
-            let mut holder_list = self
-                .holder_parametric_policies
-                .get(&caller)
-                .unwrap_or_default();
-            holder_list.push(policy_id);
-            self.holder_parametric_policies
-                .insert(&caller, &holder_list);
+                let mut holder_list = self
+                    .holder_parametric_policies
+                    .get(&caller)
+                    .unwrap_or_default();
+                holder_list.push(policy_id);
+                self.holder_parametric_policies
+                    .insert(&caller, &holder_list);
 
-            self.env().emit_event(ParametricPolicyCreated {
-                policy_id,
-                policyholder: caller,
-                property_id,
-                metric,
-                trigger_threshold,
-                coverage_amount,
-            });
+                self.env().emit_event(ParametricPolicyCreated {
+                    policy_id,
+                    policyholder: caller,
+                    property_id,
+                    metric,
+                    trigger_threshold,
+                    coverage_amount,
+                });
 
-            Ok(policy_id)
+                Ok(policy_id)
+            })
         }
 
         /// Submit an oracle data point for a property metric.
