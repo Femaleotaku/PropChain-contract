@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 
@@ -383,7 +384,14 @@ mod ipfs_metadata {
         // METADATA VALIDATION
         // ============================================================================
 
-        /// Validates and registers property metadata
+        /// Validates and registers property metadata.
+        ///
+        /// Registering metadata mutates a property's on-chain document store,
+        /// so the caller must already control the property: it must hold
+        /// `Write` or `Admin` access for `property_id`, or be the contract
+        /// admin. The contract admin is the bootstrap path for properties that
+        /// nobody controls yet and receives persistent `Admin` access on the
+        /// property; authorized non-admin callers are never escalated.
         #[ink(message)]
         pub fn validate_and_register_metadata(
             &mut self,
@@ -392,15 +400,26 @@ mod ipfs_metadata {
         ) -> Result<(), Error> {
             let caller = self.env().caller();
 
+            // Authorization: reject callers without write access. The check
+            // passes for the contract admin, who bootstraps new properties.
+            let is_contract_admin = caller == self.admin;
+            if !is_contract_admin {
+                self.check_write_access(property_id, caller)?;
+            }
+
             // Validate metadata structure
             self.validate_metadata(metadata.clone())?;
 
             // Store metadata
             self.property_metadata.insert(property_id, &metadata);
 
-            // Grant admin access to property owner
-            self.access_permissions
-                .insert((property_id, caller), &AccessLevel::Admin);
+            // Bootstrap grant: persist the contract admin's ownership-level
+            // access so later permission checks succeed without special cases.
+            // Non-admin callers keep their existing access level.
+            if is_contract_admin {
+                self.access_permissions
+                    .insert((property_id, caller), &AccessLevel::Admin);
+            }
 
             // Emit validation event
             self.env().emit_event(MetadataValidated {
@@ -1040,6 +1059,134 @@ mod ipfs_metadata {
     mod tests {
         use super::*;
 
+        /// Valid metadata sample for registration tests.
+        fn sample_metadata() -> PropertyMetadata {
+            PropertyMetadata {
+                location: String::from("123 Main Street"),
+                size: 120,
+                legal_description: String::from("Freehold residential lot"),
+                valuation: 250_000,
+                documents_ipfs_cid: None,
+                images_ipfs_cid: None,
+                legal_docs_ipfs_cid: None,
+                created_at: 0,
+                content_hash: Hash::from([0x44; 32]),
+                is_encrypted: false,
+            }
+        }
+
+        fn valid_cid() -> IpfsCid {
+            // CIDv1-style identifier (starts with 'b', >= 10 chars)
+            String::from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        }
+
+        #[ink::test]
+        fn unauthorized_validate_and_register_rejected() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut contract = IpfsMetadataRegistry::new(); // alice is admin
+
+            // Bob has no access to the property.
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            assert_eq!(
+                contract.validate_and_register_metadata(1, sample_metadata()),
+                Err(Error::Unauthorized)
+            );
+
+            // The failed attempt must not grant Bob any write access either:
+            // document registration stays rejected.
+            assert_eq!(
+                contract.register_ipfs_document(
+                    1,
+                    valid_cid(),
+                    DocumentType::Deed,
+                    Hash::from([0x55; 32]),
+                    1024,
+                    String::from("application/pdf"),
+                    false,
+                ),
+                Err(Error::Unauthorized)
+            );
+        }
+
+        #[ink::test]
+        fn admin_can_bootstrap_property_access() {
+            let mut contract = IpfsMetadataRegistry::new(); // alice (caller) is admin
+
+            contract
+                .validate_and_register_metadata(1, sample_metadata())
+                .unwrap();
+            assert!(contract.get_metadata(1).is_some());
+
+            // Bootstrapped admin can now manage the property's documents.
+            let doc_id = contract
+                .register_ipfs_document(
+                    1,
+                    valid_cid(),
+                    DocumentType::Deed,
+                    Hash::from([0x55; 32]),
+                    1024,
+                    String::from("application/pdf"),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(doc_id, 1);
+        }
+
+        #[ink::test]
+        fn granted_writer_can_register_metadata_without_escalation() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut contract = IpfsMetadataRegistry::new(); // alice is admin
+
+            // Admin bootstraps the property and grants Bob write access.
+            contract
+                .validate_and_register_metadata(1, sample_metadata())
+                .unwrap();
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            contract
+                .grant_access(1, accounts.bob, AccessLevel::Write)
+                .unwrap();
+
+            // Bob (Write) may register metadata for that property...
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            assert_eq!(
+                contract.validate_and_register_metadata(1, sample_metadata()),
+                Ok(())
+            );
+
+            // ...and manage its documents.
+            assert_eq!(
+                contract.register_ipfs_document(
+                    1,
+                    valid_cid(),
+                    DocumentType::Deed,
+                    Hash::from([0x55; 32]),
+                    1024,
+                    String::from("application/pdf"),
+                    false,
+                ),
+                Ok(1)
+            );
+
+            // But an unrelated account (Charlie) gains nothing anywhere.
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
+            assert_eq!(
+                contract.validate_and_register_metadata(2, sample_metadata()),
+                Err(Error::Unauthorized)
+            );
+            assert_eq!(
+                contract.register_ipfs_document(
+                    1,
+                    String::from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"),
+                    DocumentType::Title,
+                    Hash::from([0x66; 32]),
+                    2048,
+                    String::from("application/pdf"),
+                    false,
+                ),
+                Err(Error::Unauthorized)
+            );
+        }
+
         #[ink::test]
         fn notarize_document_creates_record() {
             let mut contract = IpfsMetadataRegistry::new();
@@ -1081,6 +1228,160 @@ mod ipfs_metadata {
 
             let result = contract.verify_document_notarization(property_id, document_hash);
             assert_eq!(result, None);
+        }
+
+        // ── Issue #990: access control & media registration coverage ──────
+
+        /// Deterministic metadata fixture that passes default validation.
+        fn sample_metadata(seed: u8) -> PropertyMetadata {
+            PropertyMetadata {
+                location: String::from("123 Test Street, Test City"),
+                size: 250,
+                legal_description: String::from("Lot 42, Block 7, Test Subdivision"),
+                valuation: 350_000,
+                documents_ipfs_cid: None,
+                images_ipfs_cid: None,
+                legal_docs_ipfs_cid: None,
+                created_at: 0,
+                content_hash: Hash::from([seed; 32]),
+                is_encrypted: false,
+            }
+        }
+
+        /// Documents the (current) escalation behaviour of
+        /// `validate_and_register_metadata`: whoever calls it for a property
+        /// is granted property-level `Admin`, which lets them administer
+        /// access grants for that property. Outsiders still cannot grant or
+        /// register anything.
+        #[ink::test]
+        fn validate_and_register_metadata_grants_caller_admin() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            // Alice constructs the contract and is the platform admin.
+            let mut contract = IpfsMetadataRegistry::new();
+
+            // Bob registers metadata for a fresh property.
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            contract
+                .validate_and_register_metadata(1, sample_metadata(0x01))
+                .unwrap();
+
+            // Caller received property-level Admin (documented behaviour).
+            assert_eq!(
+                contract.access_permissions.get((1, accounts.bob)),
+                Some(AccessLevel::Admin)
+            );
+            assert_eq!(contract.access_permissions.get((1, accounts.charlie)), None);
+
+            // As the property admin, Bob can grant Read access to Charlie.
+            contract
+                .grant_access(1, accounts.charlie, AccessLevel::Read)
+                .unwrap();
+            assert_eq!(
+                contract.access_permissions.get((1, accounts.charlie)),
+                Some(AccessLevel::Read)
+            );
+
+            // An unrelated account cannot grant access on that property.
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.eve);
+            assert_eq!(
+                contract.grant_access(1, accounts.charlie, AccessLevel::Write),
+                Err(Error::Unauthorized)
+            );
+        }
+
+        /// Media registration stores a queryable document; duplicate CIDs are
+        /// rejected so content addressing stays unique.
+        #[ink::test]
+        fn media_registration_and_duplicate_cid_rejected() {
+            let mut contract = IpfsMetadataRegistry::new(); // alice = admin
+
+            let cid: IpfsCid = String::from("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+            let content_hash = Hash::from([0xAB; 32]);
+            let doc_id = contract
+                .register_ipfs_document(
+                    10,
+                    cid.clone(),
+                    DocumentType::Inspection,
+                    content_hash,
+                    1024,
+                    String::from("image/jpeg"),
+                    false,
+                )
+                .unwrap();
+
+            assert_eq!(doc_id, 1);
+            assert_eq!(contract.document_count(), 1);
+
+            let doc = contract.get_document(doc_id).unwrap();
+            assert_eq!(doc.property_id, 10);
+            assert_eq!(doc.ipfs_cid, cid);
+            assert_eq!(doc.document_type, DocumentType::Inspection);
+            assert_eq!(doc.content_hash, content_hash);
+            assert!(!doc.is_pinned);
+            assert!(!doc.is_encrypted);
+
+            // Reachable by property listing and by CID lookup.
+            assert_eq!(contract.get_property_documents(10), vec![doc_id]);
+            assert_eq!(
+                contract
+                    .get_document_by_cid(cid.clone())
+                    .unwrap()
+                    .document_id,
+                doc_id
+            );
+
+            // Registering the same CID again must fail...
+            assert_eq!(
+                contract.register_ipfs_document(
+                    10,
+                    cid.clone(),
+                    DocumentType::Deed,
+                    Hash::from([0xCD; 32]),
+                    2048,
+                    String::from("application/pdf"),
+                    true,
+                ),
+                Err(Error::DocumentAlreadyExists)
+            );
+            // ...and must not have modified the stored document.
+            assert_eq!(contract.document_count(), 1);
+            assert_eq!(
+                contract.get_document_by_cid(cid).unwrap().document_type,
+                DocumentType::Inspection
+            );
+        }
+
+        /// Accounts without any permission on a property are rejected from
+        /// both document registration and access granting.
+        #[ink::test]
+        fn non_admin_rejected_from_registration_and_grants() {
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            let mut contract = IpfsMetadataRegistry::new(); // alice = platform admin
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.eve);
+
+            // Eve has no permissions on property 7 at all.
+            assert_eq!(
+                contract.register_ipfs_document(
+                    7,
+                    String::from("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"),
+                    DocumentType::Survey,
+                    Hash::from([0xEE; 32]),
+                    512,
+                    String::from("application/pdf"),
+                    false,
+                ),
+                Err(Error::Unauthorized)
+            );
+            assert_eq!(
+                contract.grant_access(7, accounts.charlie, AccessLevel::Write),
+                Err(Error::Unauthorized)
+            );
+
+            // Nothing was created by the rejected calls.
+            assert_eq!(contract.document_count(), 0);
+            assert!(contract.get_property_documents(7).is_empty());
+            assert_eq!(contract.access_permissions.get((7, accounts.charlie)), None);
         }
     }
 }
