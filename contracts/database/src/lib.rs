@@ -31,7 +31,7 @@ use ink::prelude::vec::Vec;
 use ink::storage::Mapping;
 
 #[ink::contract]
-mod propchain_database {
+pub mod propchain_database {
     use super::*;
 
     // Data types extracted to types.rs (Issue #101)
