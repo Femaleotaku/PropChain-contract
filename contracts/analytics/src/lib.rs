@@ -6,6 +6,11 @@
 use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
 
+/// Standalone staking-dashboard helper with its own events, error type and
+/// unit tests (wired into the crate per Issue #983; previously a dead file
+/// that was never compiled or tested).
+pub mod staking_dashboard;
+
 #[ink::contract]
 pub mod propchain_analytics {
     use super::*;
