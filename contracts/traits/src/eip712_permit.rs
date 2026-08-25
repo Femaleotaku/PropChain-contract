@@ -1,6 +1,6 @@
-use crate::crypto;
-use crate::AccountId;
 use ink::primitives::Hash;
+
+use crate::{crypto, AccountId};
 
 /// EIP-2612-style permit payload (Issue #995).
 ///
@@ -73,8 +73,9 @@ impl Eip712Permit {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use secp256k1::{Message, Secp256k1, SecretKey};
+
+    use super::*;
 
     /// Sign `hash` with the secret for `index` and return
     /// (public_key, signature) in the shapes the contract expects.
@@ -127,9 +128,7 @@ mod tests {
         // Signed by someone who is not the owner.
         let (_attacker_key, attacker_sig) = sign(2, &hash);
         let (owner_key, _owner_sig) = sign(1, &hash);
-        assert!(!permit.verify_permit(
-            1, 7, 4_999, &owner_key, &attacker_sig
-        ));
+        assert!(!permit.verify_permit(1, 7, 4_999, &owner_key, &attacker_sig));
     }
 
     #[test]
@@ -144,15 +143,11 @@ mod tests {
         // value: the payload hash no longer matches the signed one.
         let mut tampered = sample_permit(owner, spender);
         tampered.value = 999_999;
-        assert!(!tampered.verify_permit(
-            1, 7, 4_999, &public_key, &signature
-        ));
+        assert!(!tampered.verify_permit(1, 7, 4_999, &public_key, &signature));
 
         let mut other_spender = sample_permit(owner, spender);
         other_spender.spender = AccountId::from([0x33; 32]);
-        assert!(!other_spender.verify_permit(
-            1, 7, 4_999, &public_key, &signature
-        ));
+        assert!(!other_spender.verify_permit(1, 7, 4_999, &public_key, &signature));
     }
 
     #[test]
@@ -164,17 +159,11 @@ mod tests {
         let (public_key, signature) = sign(1, &hash);
 
         // Wrong chain id / replayed nonce.
-        assert!(!permit.verify_permit(
-            2, 7, 4_999, &public_key, &signature
-        ));
-        assert!(!permit.verify_permit(
-            1, 8, 4_999, &public_key, &signature
-        ));
+        assert!(!permit.verify_permit(2, 7, 4_999, &public_key, &signature));
+        assert!(!permit.verify_permit(1, 8, 4_999, &public_key, &signature));
 
         // Expired: strictly past the deadline.
-        assert!(!permit.verify_permit(
-            1, 7, 5_001, &public_key, &signature
-        ));
+        assert!(!permit.verify_permit(1, 7, 5_001, &public_key, &signature));
     }
 
     #[test]

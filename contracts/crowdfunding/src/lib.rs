@@ -547,8 +547,8 @@ mod propchain_crowdfunding {
                 .raised_amount
                 .checked_add(amount)
                 .ok_or(CrowdfundingError::ArithmeticOverflow)?;
-            let shares = u64::try_from(amount / 1000)
-                .map_err(|_| CrowdfundingError::ArithmeticOverflow)?;
+            let shares =
+                u64::try_from(amount / 1000).map_err(|_| CrowdfundingError::ArithmeticOverflow)?;
             let current_shares = self.share_holdings.get((campaign_id, caller)).unwrap_or(0);
             let new_shares = current_shares
                 .checked_add(shares)
@@ -557,8 +557,7 @@ mod propchain_crowdfunding {
             if current == 0 {
                 campaign.investor_count += 1;
             }
-            self.investments
-                .insert((campaign_id, caller), &new_total);
+            self.investments.insert((campaign_id, caller), &new_total);
             campaign.raised_amount = new_raised;
             if campaign.raised_amount >= campaign.target_amount {
                 campaign.status = CampaignStatus::Funded;
@@ -901,10 +900,8 @@ mod propchain_crowdfunding {
             let new_buyer_shares = buyer_shares
                 .checked_add(listing.shares)
                 .ok_or(CrowdfundingError::ArithmeticOverflow)?;
-            self.share_holdings.insert(
-                (listing.campaign_id, buyer),
-                &new_buyer_shares,
-            );
+            self.share_holdings
+                .insert((listing.campaign_id, buyer), &new_buyer_shares);
             self.listings.remove(listing_id);
             Ok(total_cost)
         }
@@ -1845,7 +1842,10 @@ mod tests {
 
     // ── Overflow-safe funding ledger (Issue #994) ────────────
 
-    fn onboard_accredited_investor(contract: &mut RealEstateCrowdfunding, who: ink::primitives::AccountId) {
+    fn onboard_accredited_investor(
+        contract: &mut RealEstateCrowdfunding,
+        who: ink::primitives::AccountId,
+    ) {
         test::set_caller::<DefaultEnvironment>(who);
         contract.onboard_investor("US".into(), false).unwrap();
         let accounts = test::default_accounts::<DefaultEnvironment>();

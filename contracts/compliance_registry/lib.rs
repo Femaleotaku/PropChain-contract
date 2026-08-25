@@ -2812,24 +2812,25 @@ mod compliance_registry {
             // tax status.
             ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.django);
             assert_eq!(
-                contract.update_tax_compliance_status(user, TaxComplianceStatus {
-                    jurisdiction_code: 840,
-                    reporting_period: 2026,
-                    last_checked_at: 0,
-                    last_payment_at: 0,
-                    outstanding_tax: 500,
-                    reporting_submitted: false,
-                    legal_documents_verified: false,
-                    clearance_expiry: 0,
-                    violation_count: 0,
-                }),
+                contract.update_tax_compliance_status(
+                    user,
+                    TaxComplianceStatus {
+                        jurisdiction_code: 840,
+                        reporting_period: 2026,
+                        last_checked_at: 0,
+                        last_payment_at: 0,
+                        outstanding_tax: 500,
+                        reporting_submitted: false,
+                        legal_documents_verified: false,
+                        clearance_expiry: 0,
+                        violation_count: 0,
+                    }
+                ),
                 Err(Error::NotAuthorized)
             );
 
             // Owner registers a dedicated tax module.
-            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(
-                AccountId::from([0x01; 32]),
-            );
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(AccountId::from([0x01; 32]));
             contract
                 .set_tax_module(accounts.charlie, true)
                 .expect("owner registers tax module");
@@ -2837,17 +2838,20 @@ mod compliance_registry {
             // The module reports outstanding tax: the gate must close...
             ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
             contract
-                .update_tax_compliance_status(user, TaxComplianceStatus {
-                    jurisdiction_code: 840,
-                    reporting_period: 2026,
-                    last_checked_at: 1_000,
-                    last_payment_at: 900,
-                    outstanding_tax: 500,
-                    reporting_submitted: false,
-                    legal_documents_verified: false,
-                    clearance_expiry: 0,
-                    violation_count: 1,
-                })
+                .update_tax_compliance_status(
+                    user,
+                    TaxComplianceStatus {
+                        jurisdiction_code: 840,
+                        reporting_period: 2026,
+                        last_checked_at: 1_000,
+                        last_payment_at: 900,
+                        outstanding_tax: 500,
+                        reporting_submitted: false,
+                        legal_documents_verified: false,
+                        clearance_expiry: 0,
+                        violation_count: 1,
+                    },
+                )
                 .expect("tax module sync");
             let synced = contract.get_tax_compliance_status(user).unwrap();
             assert_eq!(synced.outstanding_tax, 500);
@@ -2857,17 +2861,20 @@ mod compliance_registry {
 
             // ...and clears once the account is fully tax compliant.
             contract
-                .update_tax_compliance_status(user, TaxComplianceStatus {
-                    jurisdiction_code: 840,
-                    reporting_period: 2026,
-                    last_checked_at: 2_000,
-                    last_payment_at: 2_000,
-                    outstanding_tax: 0,
-                    reporting_submitted: true,
-                    legal_documents_verified: true,
-                    clearance_expiry: 5_000,
-                    violation_count: 1,
-                })
+                .update_tax_compliance_status(
+                    user,
+                    TaxComplianceStatus {
+                        jurisdiction_code: 840,
+                        reporting_period: 2026,
+                        last_checked_at: 2_000,
+                        last_payment_at: 2_000,
+                        outstanding_tax: 0,
+                        reporting_submitted: true,
+                        legal_documents_verified: true,
+                        clearance_expiry: 5_000,
+                        violation_count: 1,
+                    },
+                )
                 .expect("tax module clear");
             assert!(contract.is_compliant(user));
             assert!(contract.require_compliance(user).is_ok());
@@ -2880,17 +2887,20 @@ mod compliance_registry {
 
             // clearance_expiry == 0 means "never expires".
             contract
-                .update_tax_compliance_status(user, TaxComplianceStatus {
-                    jurisdiction_code: 840,
-                    reporting_period: 2026,
-                    last_checked_at: 6_000,
-                    last_payment_at: 6_000,
-                    outstanding_tax: 0,
-                    reporting_submitted: true,
-                    legal_documents_verified: true,
-                    clearance_expiry: 0,
-                    violation_count: 1,
-                })
+                .update_tax_compliance_status(
+                    user,
+                    TaxComplianceStatus {
+                        jurisdiction_code: 840,
+                        reporting_period: 2026,
+                        last_checked_at: 6_000,
+                        last_payment_at: 6_000,
+                        outstanding_tax: 0,
+                        reporting_submitted: true,
+                        legal_documents_verified: true,
+                        clearance_expiry: 0,
+                        violation_count: 1,
+                    },
+                )
                 .expect("permanent clearance sync");
             assert!(contract.require_compliance(user).is_ok());
         }
