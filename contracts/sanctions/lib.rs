@@ -612,6 +612,61 @@ pub mod sanctions_screening {
             assert_eq!(result.sanction_level, SanctionLevel::None);
         }
 
+        // ── Screening-threshold tests (Issue #1020) ────────────────────────────
+
+        #[ink::test]
+        fn test_non_admin_cannot_set_screening_threshold() {
+            let mut contract = default_contract();
+            let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+            let result = contract.set_screening_threshold(30);
+            assert_eq!(result, Err(Error::NotAuthorized));
+
+            // Threshold must be unchanged after the rejected update
+            assert_eq!(contract.screening_threshold(), 90);
+        }
+
+        #[ink::test]
+        fn test_admin_sets_screening_threshold() {
+            let mut contract = default_contract();
+
+            // Initial value is 90 days
+            assert_eq!(contract.screening_threshold(), 90);
+
+            contract.set_screening_threshold(30).expect("admin set");
+            assert_eq!(contract.screening_threshold(), 30);
+        }
+
+        #[ink::test]
+        fn test_screening_threshold_round_trips() {
+            let mut contract = default_contract();
+
+            contract.set_screening_threshold(30).expect("set 30");
+            assert_eq!(contract.screening_threshold(), 30);
+
+            // A second update overwrites the stored value
+            contract.set_screening_threshold(45).expect("set 45");
+            assert_eq!(contract.screening_threshold(), 45);
+
+            // Zero is accepted as a plain value (no special-casing)
+            contract.set_screening_threshold(0).expect("set 0");
+            assert_eq!(contract.screening_threshold(), 0);
+        }
+
+        #[ink::test]
+        fn test_threshold_update_emits_sanction_threshold_updated_event() {
+            use scale::Decode as _;
+
+            let mut contract = default_contract();
+            contract.set_screening_threshold(30).expect("admin set");
+
+            let events = ink::env::test::recorded_events().collect::<Vec<_>>();
+            assert_eq!(events.len(), 1);
+
+            let decoded =
+                SanctionThresholdUpdated::decode(&mut &events[0].data[..]).expect("decode event");
+            assert_eq!(decoded.threshold, 30);
         #[ink::test]
         fn test_add_entity_at_exact_cap_succeeds_next_fails() {
             let mut contract = default_contract();
