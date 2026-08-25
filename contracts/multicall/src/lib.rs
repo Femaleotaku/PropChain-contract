@@ -80,11 +80,17 @@ mod propchain_multicall {
         ///
         /// Reverts the entire transaction if **any** call fails, regardless
         /// of the individual `allow_revert` flags.
+        ///
+        /// Attaching native tokens to this call is not supported. Use
+        /// `CallRequest.transferred_value` to forward value per-call.
         #[ink(message, payable)]
         pub fn aggregate(
             &mut self,
             calls: Vec<CallRequest>,
         ) -> Result<Vec<CallResult>, MulticallError> {
+            if self.env().transferred_value() > 0 {
+                return Err(MulticallError::UnexpectedValue);
+            }
             self.ensure_not_paused()?;
             self.validate_calls(&calls)?;
 
@@ -108,11 +114,17 @@ mod propchain_multicall {
         /// Individual calls that have `allow_revert = false` still cause a
         /// full revert; calls with `allow_revert = true` record the failure
         /// and continue.
+        ///
+        /// Attaching native tokens to this call is not supported. Use
+        /// `CallRequest.transferred_value` to forward value per-call.
         #[ink(message, payable)]
         pub fn try_aggregate_calls(
             &mut self,
             calls: Vec<CallRequest>,
         ) -> Result<Vec<CallResult>, MulticallError> {
+            if self.env().transferred_value() > 0 {
+                return Err(MulticallError::UnexpectedValue);
+            }
             self.ensure_not_paused()?;
             self.validate_calls(&calls)?;
 
