@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::arithmetic_side_effects,
@@ -9,7 +10,7 @@
 use ink::storage::Mapping;
 
 #[ink::contract]
-mod propchain_crowdfunding {
+pub mod propchain_crowdfunding {
     use ink::prelude::string::String;
     use ink::prelude::vec::Vec;
 

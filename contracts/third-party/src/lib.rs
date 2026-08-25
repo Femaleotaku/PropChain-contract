@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unexpected_cfgs)]
 #![allow(clippy::new_without_default)]
@@ -328,6 +329,16 @@ mod propchain_third_party {
         }
 
         /// Check if a user is KYC verified (view function for other contracts)
+        ///
+        /// Returns `true` only when the user holds an **active** KYC record
+        /// whose stored `verification_level` is **greater than or equal to**
+        /// `required_level` and whose `expires_at` timestamp is still in the
+        /// future. The level ladder is provider-defined: callers choose the
+        /// minimum level they trust for their operation (e.g. `1` = basic
+        /// identity check, higher values indicate stronger verification such
+        /// as proof-of-address or accredited-investor checks). Any other
+        /// condition — no record, inactive record, insufficient level, or an
+        /// expired record — yields `false`. This message never reverts.
         #[ink(message)]
         pub fn is_kyc_verified(&self, user: AccountId, required_level: u8) -> bool {
             if let Some(record) = self.kyc_records.get(user) {
@@ -467,16 +478,30 @@ mod propchain_third_party {
         // QUERIES
         // ====================================================================
 
+        /// Returns the configuration of a registered service.
+        ///
+        /// Callable by anyone (public read). Returns `None` when `service_id`
+        /// does not exist instead of an error.
         #[ink(message)]
         pub fn get_service_config(&self, service_id: ServiceId) -> Option<ServiceConfig> {
             self.services.get(service_id)
         }
 
+        /// Returns the stored KYC record for a user.
+        ///
+        /// Callable by anyone (public read). The record may be inactive or
+        /// expired; callers should confirm liveness with
+        /// [`is_kyc_verified`](Self::is_kyc_verified). Returns `None` when no
+        /// KYC has ever been completed for `user`.
         #[ink(message)]
         pub fn get_kyc_record(&self, user: AccountId) -> Option<KycRecord> {
             self.kyc_records.get(user)
         }
 
+        /// Returns a fiat payment request by identifier.
+        ///
+        /// Callable by anyone (public read). Returns `None` when
+        /// `request_id` does not exist.
         #[ink(message)]
         pub fn get_payment_request(&self, request_id: RequestId) -> Option<PaymentRequest> {
             self.payment_requests.get(request_id)

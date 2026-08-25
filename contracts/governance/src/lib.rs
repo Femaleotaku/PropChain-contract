@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::too_many_arguments,
@@ -5,6 +6,19 @@
     clippy::needless_borrows_for_generic_args,
     clippy::manual_checked_ops
 )]
+
+// Required by the standalone `delegation` helper module in no_std builds.
+extern crate alloc;
+
+// Standalone governance helpers wired into the build per Issue #982 (they
+// were previously dead files that were never compiled or tested). They are
+// unit-tested by `cargo test -p propchain-governance`; exposing them on the
+// on-chain message surface remains a separate feature decision.
+pub mod delegation;
+pub mod treasury;
+
+#[cfg(test)]
+mod snapshot_tests;
 
 #[ink::contract]
 mod governance {
