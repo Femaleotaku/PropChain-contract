@@ -1644,10 +1644,7 @@ mod property_management {
             test::set_value_transferred::<DefaultEnvironment>(100);
             pm.counterparty_stake_dispute(did).expect("counter");
             assert_eq!(pm.dispute_escrow_locked_balance(), 200);
-            assert_eq!(
-                pm.get_dispute(did).expect("d").status,
-                DisputeStatus::Open
-            );
+            assert_eq!(pm.get_dispute(did).expect("d").status, DisputeStatus::Open);
 
             // Resolution releases the whole escrow.
             test::set_caller::<DefaultEnvironment>(accounts.alice);

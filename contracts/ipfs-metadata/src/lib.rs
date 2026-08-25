@@ -1123,10 +1123,7 @@ mod ipfs_metadata {
                 contract.access_permissions.get((1, accounts.bob)),
                 Some(AccessLevel::Admin)
             );
-            assert_eq!(
-                contract.access_permissions.get((1, accounts.charlie)),
-                None
-            );
+            assert_eq!(contract.access_permissions.get((1, accounts.charlie)), None);
 
             // As the property admin, Bob can grant Read access to Charlie.
             contract
@@ -1179,7 +1176,10 @@ mod ipfs_metadata {
             // Reachable by property listing and by CID lookup.
             assert_eq!(contract.get_property_documents(10), vec![doc_id]);
             assert_eq!(
-                contract.get_document_by_cid(cid.clone()).unwrap().document_id,
+                contract
+                    .get_document_by_cid(cid.clone())
+                    .unwrap()
+                    .document_id,
                 doc_id
             );
 
@@ -1234,10 +1234,7 @@ mod ipfs_metadata {
             // Nothing was created by the rejected calls.
             assert_eq!(contract.document_count(), 0);
             assert!(contract.get_property_documents(7).is_empty());
-            assert_eq!(
-                contract.access_permissions.get((7, accounts.charlie)),
-                None
-            );
+            assert_eq!(contract.access_permissions.get((7, accounts.charlie)), None);
         }
     }
 }

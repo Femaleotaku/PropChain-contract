@@ -1,11 +1,11 @@
-﻿#![cfg(test)]
+#![cfg(test)]
 #![allow(unused_variables)]
 
 use ink::env::test::{default_accounts, DefaultAccounts};
 use ink::primitives::AccountId;
+use propchain_identity::propchain_identity::dashboard::IdentityDashboard;
 use propchain_identity::propchain_identity::{
-    dashboard::IdentityDashboard, IdentityError, IdentityRegistry, PrivacySettings, RiskLevel,
-    VerificationLevel,
+    IdentityError, IdentityRegistry, PrivacySettings, RiskLevel, VerificationLevel,
 };
 
 fn open_privacy_settings() -> PrivacySettings {
@@ -904,9 +904,10 @@ fn test_recovery_approvals_complete_and_migrate_identity() {
     );
     let mid_recovery = identity_registry.get_identity(accounts.bob).unwrap();
     assert!(mid_recovery.social_recovery.is_recovery_active);
-    assert_eq!(mid_recovery.social_recovery.recovery_approvals, vec![
-        accounts.charlie
-    ]);
+    assert_eq!(
+        mid_recovery.social_recovery.recovery_approvals,
+        vec![accounts.charlie]
+    );
 
     // Second guardian approval reaches threshold and migrates the identity
     ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.django);
@@ -1010,8 +1011,14 @@ fn test_dashboard_identity_profile_aggregates_registry_state() {
         identity_registry.verify_identity(accounts.bob, VerificationLevel::Standard, None),
         Ok(())
     );
-    assert_eq!(identity_registry.update_reputation(accounts.bob, true, 1000), Ok(()));
-    assert_eq!(identity_registry.update_reputation(accounts.bob, true, 1000), Ok(()));
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, true, 1000),
+        Ok(())
+    );
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, true, 1000),
+        Ok(())
+    );
 
     // Seed one cross-chain verification on Ethereum (chain 1); the owner must
     // be the caller and reputation becomes (510 + 600) / 2 = 555
@@ -1028,12 +1035,9 @@ fn test_dashboard_identity_profile_aggregates_registry_state() {
     let reputation_metrics = identity_registry
         .get_reputation_metrics(accounts.bob)
         .unwrap();
-    let ethereum_verification =
-        identity_registry.get_cross_chain_verification(accounts.bob, 1);
-    let cross_chain_summaries = IdentityDashboard::build_cross_chain_summary(vec![
-        (1, ethereum_verification),
-        (2, None),
-    ]);
+    let ethereum_verification = identity_registry.get_cross_chain_verification(accounts.bob, 1);
+    let cross_chain_summaries =
+        IdentityDashboard::build_cross_chain_summary(vec![(1, ethereum_verification), (2, None)]);
 
     let profile = IdentityDashboard::build_identity_profile(
         accounts.bob,
@@ -1234,9 +1238,18 @@ fn test_dashboard_privacy_activity_and_statistics_views() {
     assert!(!guarded.is_recovery_active);
 
     // Mixed transaction history: 2 successes of 500, 1 failure of 200
-    assert_eq!(identity_registry.update_reputation(accounts.bob, true, 500), Ok(()));
-    assert_eq!(identity_registry.update_reputation(accounts.bob, true, 500), Ok(()));
-    assert_eq!(identity_registry.update_reputation(accounts.bob, false, 200), Ok(()));
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, true, 500),
+        Ok(())
+    );
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, true, 500),
+        Ok(())
+    );
+    assert_eq!(
+        identity_registry.update_reputation(accounts.bob, false, 200),
+        Ok(())
+    );
 
     let history = IdentityDashboard::build_activity_history(
         accounts.bob,
@@ -1253,8 +1266,7 @@ fn test_dashboard_privacy_activity_and_statistics_views() {
     assert!(history.recent_activities.is_empty());
 
     // Accounts without activity fall back to zeroed defaults
-    let empty_history =
-        IdentityDashboard::build_activity_history(accounts.django, None);
+    let empty_history = IdentityDashboard::build_activity_history(accounts.django, None);
     assert_eq!(empty_history.total_transactions, 0);
     assert_eq!(empty_history.average_transaction_value, 0);
     assert_eq!(empty_history.total_value_transacted, 0);
