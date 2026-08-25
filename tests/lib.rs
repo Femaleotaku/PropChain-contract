@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 //! PropChain Test Suite
 //!
 //! This module provides the test library for PropChain contracts,
@@ -19,10 +20,19 @@ pub mod security_audit_runner;
 /// Issue #487: Regression test suite for all previously fixed bugs
 pub mod regression;
 
-// ─── Issue Integration Test Modules ──────────────────────────────────
+// ─── Integration Test Modules ─────────────────────────────────────────
+/// Issue #1001: Insurance integration coverage (policy lifecycle, claims,
+/// admin/oracle authorization paths)
+pub mod integration_insurance;
+/// Issue #1002: Governance integration coverage (signers → proposal →
+/// votes → timelock → execution)
+pub mod integration_governance;
+/// Issues #1003 / #1004: Monitoring and sanctions screening integration
+/// coverage (admin surface, pause gating; sanctioned entity/property flows)
+pub mod integration_monitoring_sanctions;
 /// Issue #1005: GDPR consent management integration tests
 pub mod integration_gdpr;
-/// Issue #1006 + #1007: Contract factory and IPFS metadata registry integration tests
+/// Issues #1006 / #1007: Contract factory and IPFS metadata registry tests
 pub mod integration_factory_ipfs;
 /// Issue #1008: Fractional share trading integration tests
 pub mod integration_fractional;

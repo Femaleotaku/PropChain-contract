@@ -1158,8 +1158,6 @@ mod tests {
     }
 
     #[ink::test]
-  
-#[ink::test]
 fn early_withdrawal_applies_penalty() {
     let mut staking = create_staking();
     let accounts = default_accounts();
@@ -1237,7 +1235,9 @@ fn set_early_withdrawal_penalty_max_cap() {
     // Exactly at cap is fine
     assert!(staking.set_early_withdrawal_penalty(5_000).is_ok());
 }
-    fn staking_tiers_applied_correctly() {
+
+#[ink::test]
+fn staking_tiers_applied_correctly() {
         let mut staking = create_staking();
         let accounts = default_accounts();
         
@@ -1571,5 +1571,94 @@ fn set_early_withdrawal_penalty_max_cap() {
         vesting_after_claim.vested_amount = 500;
         assert_eq!(vesting_after_claim.claimable_at_block(200), 0);
         assert_eq!(vesting_after_claim.claimable_at_block(300), 500);
+    }
+
+    // =========================================================================
+    // Unbonding boundary + early-withdrawal penalty math (Issue #1000)
+    // =========================================================================
+
+    #[ink::test]
+    fn claim_undelegated_exactly_at_boundary_succeeds() {
+        let mut staking = create_staking();
+        let accounts = default_accounts();
+        set_caller(accounts.bob);
+        staking.register_validator(MIN_VALIDATOR_STAKE, 500).unwrap();
+
+        set_caller(accounts.charlie);
+        staking.delegate(accounts.bob, 5_000).unwrap();
+        staking.undelegate(accounts.bob).unwrap();
+
+        // The check is `now < start + UNBONDING_PERIOD_BLOCKS`, so claiming
+        // at exactly the boundary block must succeed (off-by-one guard).
+        advance_block(UNBONDING_PERIOD_BLOCKS as u32);
+
+        let amount = staking.claim_undelegated(accounts.bob).unwrap();
+        assert_eq!(amount, 5_000);
+        assert!(staking.get_delegation(accounts.charlie, accounts.bob).is_none());
+    }
+
+    #[ink::test]
+    fn claim_undelegated_one_block_before_boundary_fails() {
+        let mut staking = create_staking();
+        let accounts = default_accounts();
+        set_caller(accounts.bob);
+        staking.register_validator(MIN_VALIDATOR_STAKE, 500).unwrap();
+
+        set_caller(accounts.charlie);
+        staking.delegate(accounts.bob, 5_000).unwrap();
+        staking.undelegate(accounts.bob).unwrap();
+
+        advance_block(UNBONDING_PERIOD_BLOCKS as u32 - 1);
+        assert_eq!(
+            staking.claim_undelegated(accounts.bob),
+            Err(Error::UnbondingPeriodActive)
+        );
+
+        // The very next block crosses the boundary and succeeds.
+        advance_block(1);
+        assert_eq!(staking.claim_undelegated(accounts.bob).unwrap(), 5_000);
+    }
+
+    #[ink::test]
+    fn unstake_locked_penalty_exact_math_on_non_round_amount() {
+        let mut staking = create_staking();
+        let accounts = default_accounts();
+
+        // Non-default penalty keeps the test independent of the constant.
+        set_caller(accounts.alice);
+        staking.set_early_withdrawal_penalty(333).unwrap();
+
+        set_caller(accounts.bob);
+        staking.stake(12_345, LockPeriod::ThirtyDays).unwrap();
+
+        let pool_before = staking.get_reward_pool();
+
+        // Immediate unstake: penalty = 12_345 * 333 / 10_000 = 411.0885,
+        // truncated to 411 by the integer division. A formula regression
+        // (e.g. rounding up or swapping mul/div order) changes this value.
+        staking.unstake().unwrap();
+        let expected_penalty = 12_345u128 * 333 / 10_000;
+        assert_eq!(expected_penalty, 411);
+        assert_eq!(
+            staking.get_reward_pool(),
+            pool_before + expected_penalty
+        );
+        assert_eq!(staking.get_total_staked(), 0);
+        assert!(staking.get_stake(accounts.bob).is_none());
+    }
+
+    #[ink::test]
+    fn unstake_locked_default_penalty_is_ten_percent() {
+        let mut staking = create_staking();
+        let accounts = default_accounts();
+        set_caller(accounts.bob);
+
+        assert_eq!(staking.get_early_withdrawal_penalty_bps(), 1_000);
+        staking.stake(9_999, LockPeriod::ThirtyDays).unwrap();
+
+        let pool_before = staking.get_reward_pool();
+        staking.unstake().unwrap();
+        // 9_999 * 1_000 / 10_000 = 999.9 -> 999 retained in the pool.
+        assert_eq!(staking.get_reward_pool() - pool_before, 999);
     }
 }

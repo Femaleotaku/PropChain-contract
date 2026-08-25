@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // fires inside ink! generated storage code
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(
     clippy::arithmetic_side_effects,
@@ -298,12 +299,24 @@ mod mock_oracle_contract {
     // ── Oracle trait implementation ───────────────────────────────────────
 
     impl Oracle for MockOracle {
+        /// Returns the current mock valuation for `property_id`.
+        ///
+        /// Price resolution order: an admin-pushed price (`set_price` /
+        /// `set_prices`) wins; otherwise, with the `mock` feature enabled, a
+        /// deterministic seed of `500_000 + property_id * 1_000` is used.
+        /// Without the feature and without a pushed price this fails with
+        /// `OracleError::PropertyNotFound`. Confidence is fixed at 95.
         #[ink(message)]
         fn get_valuation(&self, property_id: u64) -> Result<PropertyValuation, OracleError> {
             let price = self.resolve_price(property_id)?;
             Ok(self.build_valuation(property_id, price))
         }
 
+        /// Returns the valuation wrapped in a synthetic confidence band.
+        ///
+        /// The interval is ±10% around the resolved price; volatility index
+        /// and outlier-source count are always zero in the mock. Errors match
+        /// `get_valuation` (e.g. `PropertyNotFound` when no price resolves).
         #[ink(message)]
         fn get_valuation_with_confidence(
             &self,
@@ -322,6 +335,12 @@ mod mock_oracle_contract {
             })
         }
 
+        /// Requests a valuation for `property_id` and records it immediately.
+        ///
+        /// The mock resolves synchronously: the returned request id (sequence
+        /// starting at 1) is already backed by a recorded history entry and a
+        /// `ValuationRequested` event. Fails like `get_valuation` if no price
+        /// can be resolved.
         #[ink(message)]
         fn request_valuation(&mut self, property_id: u64) -> Result<u64, OracleError> {
             self.request_counter = self.request_counter.saturating_add(1);
@@ -338,6 +357,11 @@ mod mock_oracle_contract {
             Ok(request_id)
         }
 
+        /// Requests valuations for many properties at once.
+        ///
+        /// Processes ids in order via `request_valuation`; the first failure
+        /// (e.g. `PropertyNotFound`) aborts the whole batch and no request
+        /// ids are returned for it.
         #[ink(message)]
         fn batch_request_valuations(
             &mut self,
@@ -351,6 +375,12 @@ mod mock_oracle_contract {
             Ok(ids)
         }
 
+        /// Returns up to `limit` most-recent recorded valuations for
+        /// `property_id`, newest first.
+        ///
+        /// History only accumulates through `request_valuation` /
+        /// `batch_request_valuations`; properties never requested return an
+        /// empty vector.
         #[ink(message)]
         fn get_historical_valuations(
             &self,
@@ -366,6 +396,10 @@ mod mock_oracle_contract {
                 .collect()
         }
 
+        /// Returns mock volatility metrics: index and average price change
+        /// are always zero over a fixed 30-day period.
+        ///
+        /// Never fails; arguments are echoed back for interface compliance.
         #[ink(message)]
         fn get_market_volatility(
             &self,
@@ -383,6 +417,11 @@ mod mock_oracle_contract {
             })
         }
 
+        /// Returns at most one synthetic oracle snapshot for `property_id`.
+        ///
+        /// A single snapshot (source `"mock-oracle"`, confidence 95, no
+        /// anomaly) is produced when a price currently resolves; an empty
+        /// vector is returned when the limit is zero or no price resolves.
         #[ink(message)]
         fn get_oracle_snapshots(&self, property_id: u64, limit: u32) -> Vec<OracleDataSnapshot> {
             if limit == 0 {
@@ -408,6 +447,10 @@ mod mock_oracle_contract {
             }
         }
 
+        /// Per-source reporting history; always empty in the mock.
+        ///
+        /// Retained for `Oracle` trait compliance so staging harnesses can
+        /// call it without branching on the mock.
         #[ink(message)]
         fn get_source_history(&self, _source_id: String, limit: u32) -> Vec<SourceHistoryEntry> {
             // Mock: return empty, or a single entry if any price was ever pushed.
@@ -415,6 +458,12 @@ mod mock_oracle_contract {
             Vec::new()
         }
 
+        /// Returns the current snapshot for `property_id` when the current
+        /// block timestamp falls within `[_start_timestamp, _end_timestamp]`;
+        /// otherwise an empty vector.
+        ///
+        /// The mock keeps no dated archive, so at most the live snapshot is
+        /// range-checked.
         #[ink(message)]
         fn get_history_by_date_range(
             &self,
@@ -444,6 +493,12 @@ mod mock_oracle_contract {
             }
         }
 
+        /// Returns degenerate statistics: min/max/average all equal the
+        /// currently resolved price with a single data point and zero
+        /// volatility/trend.
+        ///
+        /// Fails like `get_valuation` (e.g. `PropertyNotFound`) when no price
+        /// resolves for `property_id`.
         #[ink(message)]
         fn get_history_statistics(
             &self,
@@ -469,18 +524,21 @@ mod mock_oracle_contract {
     // ── OracleRegistry trait implementation ───────────────────────────────
 
     impl OracleRegistry for MockOracle {
+        /// No-op registration: the mock accepts any source silently.
         #[ink(message)]
         fn add_source(&mut self, _source: OracleSource) -> Result<(), OracleError> {
             // Mock: accept silently.
             Ok(())
         }
 
+        /// No-op removal: succeeds regardless of whether `source_id` exists.
         #[ink(message)]
         fn remove_source(&mut self, _source_id: String) -> Result<(), OracleError> {
             // Mock: accept silently.
             Ok(())
         }
 
+        /// Reputation updates are ignored; the mock never tracks sources.
         #[ink(message)]
         fn update_reputation(
             &mut self,
@@ -491,12 +549,14 @@ mod mock_oracle_contract {
             Ok(())
         }
 
+        /// Always reports a perfect reputation of 1000 for any source id.
         #[ink(message)]
         fn get_reputation(&self, _source_id: String) -> Option<u32> {
             // Mock: perfect reputation.
             Some(1000)
         }
 
+        /// Slashing is a no-op; no stake is held or reduced in the mock.
         #[ink(message)]
         fn slash_source(
             &mut self,
@@ -507,6 +567,8 @@ mod mock_oracle_contract {
             Ok(())
         }
 
+        /// Anomaly detection always reports false; every valuation is
+        /// considered normal in the mock.
         #[ink(message)]
         fn detect_anomalies(&self, _property_id: u64, _new_valuation: u128) -> bool {
             // Mock: never an anomaly.
