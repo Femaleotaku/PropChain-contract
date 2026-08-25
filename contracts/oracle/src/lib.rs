@@ -3544,6 +3544,10 @@ mod propchain_oracle {
             Self::new(AccountId::from([0x0u8; 32]))
         }
     }
+
+    // Include unit tests (extracted to tests.rs per Issue #101)
+    #[cfg(test)]
+    include!("tests.rs");
 }
 
 // Re-export the contract and error type

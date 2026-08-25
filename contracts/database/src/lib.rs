@@ -575,5 +575,7 @@ mod propchain_database {
     // UNIT TESTS
     // ========================================================================
 
-    // Unit tests extracted to tests.rs (Issue #101)
+    // Include unit tests (extracted to tests.rs per Issue #101)
+    #[cfg(test)]
+    include!("tests.rs");
 }
