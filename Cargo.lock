@@ -5156,6 +5156,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "propchain-common"
+version = "1.0.0"
+dependencies = [
+ "ink 5.1.1",
+ "parity-scale-codec",
+]
+
+[[package]]
 name = "propchain-contracts"
 version = "1.0.0"
 dependencies = [
@@ -5337,14 +5345,27 @@ dependencies = [
  "ink 5.1.1",
  "ink_e2e",
  "ink_env 5.1.1",
+ "ipfs-metadata",
+ "mock-oracle",
  "oracle",
  "parity-scale-codec",
+ "propchain-analytics",
  "propchain-bridge",
  "propchain-contracts",
+ "propchain-crowdfunding",
+ "propchain-database",
+ "propchain-dex",
+ "propchain-factory",
+ "propchain-fees",
+ "propchain-gdpr",
+ "propchain-identity",
  "propchain-insurance",
+ "propchain-lending",
  "propchain-monitoring",
  "propchain-third-party",
+ "propchain-sanctions",
  "propchain-traits",
+ "property-management",
  "proptest",
  "rand 0.8.6",
  "scale-info",
