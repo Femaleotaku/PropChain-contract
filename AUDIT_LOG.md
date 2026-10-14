@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Tue Oct 13 09:16:12 UTC 2026
+Generated on: Wed Oct 14 07:26:28 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -9,13 +9,13 @@ Generated on: Tue Oct 13 09:16:12 UTC 2026
 [0m[36m20[0m [0m[36m│[0m [0m[31munlicensed[0m = "deny"
    [0m[36m│[0m [0m[31m━━━━━━━━━━[0m
 
-2026-10-13 09:16:12 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
+2026-10-14 07:26:28 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
 ```
 ---
 ## 🔍 Vulnerability Advisory Scans (cargo-audit)
 ```text
 [0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
-[0m[0m[1m[32m      Loaded[0m 1308 security advisories (from /home/runner/.cargo/advisory-db)
+[0m[0m[1m[32m      Loaded[0m 1310 security advisories (from /home/runner/.cargo/advisory-db)
 [0m[0m[1m[32m    Updating[0m crates.io index
 [0m[0m[1m[32m    Scanning[0m Cargo.lock for vulnerabilities (829 crate dependencies)
 [0m[0m[1m[31mCrate:    [0m h2
@@ -81,6 +81,15 @@ Generated on: Tue Oct 13 09:16:12 UTC 2026
 [0m[0m[1m[31mID:       [0m RUSTSEC-2026-0099
 [0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0099
 [0m[0m[1m[31mSolution: [0m Upgrade to >=0.103.12, <0.104.0-alpha.1 OR >=0.104.0-alpha.6
+
+[0m[0m[1m[31mCrate:    [0m ruzstd
+[0m[0m[1m[31mVersion:  [0m 0.5.0
+[0m[0m[1m[31mTitle:    [0m Decompression bomb in `ruzstd`: a tiny input can exhaust memory (OOM)
+[0m[0m[1m[31mDate:     [0m 2026-10-11
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0344
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0344
+[0m[0m[1m[31mSeverity: [0m 7.5 (high)
+[0m[0m[1m[31mSolution: [0m Upgrade to >=0.9.1
 
 [0m[0m[1m[33mCrate:    [0m instant
 [0m[0m[1m[33mVersion:  [0m 0.1.13
@@ -182,7 +191,7 @@ Generated on: Tue Oct 13 09:16:12 UTC 2026
 [0m[0m[1m[33mVersion:  [0m 0.9.8
 [0m[0m[1m[33mWarning:  [0m yanked
 
-[0m[0m[1m[31merror:[0m 8 vulnerabilities found!
+[0m[0m[1m[31merror:[0m 9 vulnerabilities found!
 [0m[0m[1m[33mwarning:[0m 13 allowed warnings found
 ```
 ---
