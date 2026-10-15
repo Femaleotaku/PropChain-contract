@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Wed Oct 14 07:26:28 UTC 2026
+Generated on: Thu Oct 15 07:17:01 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -9,13 +9,13 @@ Generated on: Wed Oct 14 07:26:28 UTC 2026
 [0m[36m20[0m [0m[36m│[0m [0m[31munlicensed[0m = "deny"
    [0m[36m│[0m [0m[31m━━━━━━━━━━[0m
 
-2026-10-14 07:26:28 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
+2026-10-15 07:17:01 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
 ```
 ---
 ## 🔍 Vulnerability Advisory Scans (cargo-audit)
 ```text
 [0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
-[0m[0m[1m[32m      Loaded[0m 1310 security advisories (from /home/runner/.cargo/advisory-db)
+[0m[0m[1m[32m      Loaded[0m 1329 security advisories (from /home/runner/.cargo/advisory-db)
 [0m[0m[1m[32m    Updating[0m crates.io index
 [0m[0m[1m[32m    Scanning[0m Cargo.lock for vulnerabilities (829 crate dependencies)
 [0m[0m[1m[31mCrate:    [0m h2
@@ -25,6 +25,42 @@ Generated on: Wed Oct 14 07:26:28 UTC 2026
 [0m[0m[1m[31mID:       [0m RUSTSEC-2026-0258
 [0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0258
 [0m[0m[1m[31mSolution: [0m Upgrade to >=0.4.16
+
+[0m[0m[1m[31mCrate:    [0m rustls
+[0m[0m[1m[31mVersion:  [0m 0.21.12
+[0m[0m[1m[31mTitle:    [0m Unauthenticated ServerHello can downgrade later connections to classical key exchange
+[0m[0m[1m[31mDate:     [0m 2026-10-14
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0349
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0349
+[0m[0m[1m[31mSeverity: [0m 3.7 (low)
+[0m[0m[1m[31mSolution: [0m Upgrade to >=0.23.46
+
+[0m[0m[1m[31mCrate:    [0m rustls
+[0m[0m[1m[31mVersion:  [0m 0.21.12
+[0m[0m[1m[31mTitle:    [0m `Debug` impls for client session values expose TLS secrets
+[0m[0m[1m[31mDate:     [0m 2026-10-14
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0346
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0346
+[0m[0m[1m[31mSeverity: [0m 4 (medium)
+[0m[0m[1m[31mSolution: [0m Upgrade to >=0.23.46
+
+[0m[0m[1m[31mCrate:    [0m rustls
+[0m[0m[1m[31mVersion:  [0m 0.22.4
+[0m[0m[1m[31mTitle:    [0m Unauthenticated ServerHello can downgrade later connections to classical key exchange
+[0m[0m[1m[31mDate:     [0m 2026-10-14
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0349
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0349
+[0m[0m[1m[31mSeverity: [0m 3.7 (low)
+[0m[0m[1m[31mSolution: [0m Upgrade to >=0.23.46
+
+[0m[0m[1m[31mCrate:    [0m rustls
+[0m[0m[1m[31mVersion:  [0m 0.22.4
+[0m[0m[1m[31mTitle:    [0m `Debug` impls for client session values expose TLS secrets
+[0m[0m[1m[31mDate:     [0m 2026-10-14
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0346
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0346
+[0m[0m[1m[31mSeverity: [0m 4 (medium)
+[0m[0m[1m[31mSolution: [0m Upgrade to >=0.23.46
 
 [0m[0m[1m[31mCrate:    [0m rustls-webpki
 [0m[0m[1m[31mVersion:  [0m 0.101.7
@@ -191,7 +227,7 @@ Generated on: Wed Oct 14 07:26:28 UTC 2026
 [0m[0m[1m[33mVersion:  [0m 0.9.8
 [0m[0m[1m[33mWarning:  [0m yanked
 
-[0m[0m[1m[31merror:[0m 9 vulnerabilities found!
+[0m[0m[1m[31merror:[0m 13 vulnerabilities found!
 [0m[0m[1m[33mwarning:[0m 13 allowed warnings found
 ```
 ---
