@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Thu Oct 15 07:17:01 UTC 2026
+Generated on: Fri Oct 16 07:00:23 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -9,7 +9,7 @@ Generated on: Thu Oct 15 07:17:01 UTC 2026
 [0m[36m20[0m [0m[36m│[0m [0m[31munlicensed[0m = "deny"
    [0m[36m│[0m [0m[31m━━━━━━━━━━[0m
 
-2026-10-15 07:17:01 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
+2026-10-16 07:00:23 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
 ```
 ---
 ## 🔍 Vulnerability Advisory Scans (cargo-audit)
@@ -227,8 +227,12 @@ Generated on: Thu Oct 15 07:17:01 UTC 2026
 [0m[0m[1m[33mVersion:  [0m 0.9.8
 [0m[0m[1m[33mWarning:  [0m yanked
 
+[0m[0m[1m[33mCrate:    [0m zip
+[0m[0m[1m[33mVersion:  [0m 2.3.0
+[0m[0m[1m[33mWarning:  [0m yanked
+
 [0m[0m[1m[31merror:[0m 13 vulnerabilities found!
-[0m[0m[1m[33mwarning:[0m 13 allowed warnings found
+[0m[0m[1m[33mwarning:[0m 14 allowed warnings found
 ```
 ---
 ## 🧬 Mutation Gate: lending
