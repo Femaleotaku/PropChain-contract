@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Fri Oct 16 07:00:23 UTC 2026
+Generated on: Sat Oct 17 06:50:07 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -9,13 +9,13 @@ Generated on: Fri Oct 16 07:00:23 UTC 2026
 [0m[36m20[0m [0m[36m│[0m [0m[31munlicensed[0m = "deny"
    [0m[36m│[0m [0m[31m━━━━━━━━━━[0m
 
-2026-10-16 07:00:23 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
+2026-10-17 06:50:07 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
 ```
 ---
 ## 🔍 Vulnerability Advisory Scans (cargo-audit)
 ```text
 [0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
-[0m[0m[1m[32m      Loaded[0m 1329 security advisories (from /home/runner/.cargo/advisory-db)
+[0m[0m[1m[32m      Loaded[0m 1334 security advisories (from /home/runner/.cargo/advisory-db)
 [0m[0m[1m[32m    Updating[0m crates.io index
 [0m[0m[1m[32m    Scanning[0m Cargo.lock for vulnerabilities (829 crate dependencies)
 [0m[0m[1m[31mCrate:    [0m h2
@@ -127,6 +127,32 @@ Generated on: Fri Oct 16 07:00:23 UTC 2026
 [0m[0m[1m[31mSeverity: [0m 7.5 (high)
 [0m[0m[1m[31mSolution: [0m Upgrade to >=0.9.1
 
+[0m[0m[1m[31mCrate:    [0m zip
+[0m[0m[1m[31mVersion:  [0m 2.3.0
+[0m[0m[1m[31mTitle:    [0m ZipStreamReader::extract() and ZipArchive::extract() apply Unix permissions through symlinks without confining the target
+[0m[0m[1m[31mDate:     [0m 2026-10-10
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0369
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0369
+[0m[0m[1m[31mSeverity: [0m 9.1 (critical)
+[0m[0m[1m[31mSolution: [0m Upgrade to >=9.0.0
+
+[0m[0m[1m[31mCrate:    [0m zip
+[0m[0m[1m[31mVersion:  [0m 2.3.0
+[0m[0m[1m[31mTitle:    [0m  Insecure Preservation of SUID/SGID Bits during ZIP Extraction Leading to Potential Privilege Escalation
+[0m[0m[1m[31mDate:     [0m 2026-10-09
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0367
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0367
+[0m[0m[1m[31mSeverity: [0m 7.3 (high)
+[0m[0m[1m[31mSolution: [0m Upgrade to >=9.0.0
+
+[0m[0m[1m[31mCrate:    [0m zip
+[0m[0m[1m[31mVersion:  [0m 2.3.0
+[0m[0m[1m[31mTitle:    [0m zip: `ZipArchive::extract` creates symbolic links whose attacker-controlled targets are outside the destination directory
+[0m[0m[1m[31mDate:     [0m 2026-10-09
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0368
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0368
+[0m[0m[1m[31mSolution: [0m Upgrade to >=9.0.0
+
 [0m[0m[1m[33mCrate:    [0m instant
 [0m[0m[1m[33mVersion:  [0m 0.1.13
 [0m[0m[1m[33mWarning:  [0m unmaintained
@@ -227,12 +253,8 @@ Generated on: Fri Oct 16 07:00:23 UTC 2026
 [0m[0m[1m[33mVersion:  [0m 0.9.8
 [0m[0m[1m[33mWarning:  [0m yanked
 
-[0m[0m[1m[33mCrate:    [0m zip
-[0m[0m[1m[33mVersion:  [0m 2.3.0
-[0m[0m[1m[33mWarning:  [0m yanked
-
-[0m[0m[1m[31merror:[0m 13 vulnerabilities found!
-[0m[0m[1m[33mwarning:[0m 14 allowed warnings found
+[0m[0m[1m[31merror:[0m 16 vulnerabilities found!
+[0m[0m[1m[33mwarning:[0m 13 allowed warnings found
 ```
 ---
 ## 🧬 Mutation Gate: lending
