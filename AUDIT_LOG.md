@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Fri Oct 23 07:20:03 UTC 2026
+Generated on: Sat Oct 24 07:08:46 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -9,15 +9,23 @@ Generated on: Fri Oct 23 07:20:03 UTC 2026
 [0m[36m20[0m [0m[36m│[0m [0m[31munlicensed[0m = "deny"
    [0m[36m│[0m [0m[31m━━━━━━━━━━[0m
 
-2026-10-23 07:20:03 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
+2026-10-24 07:08:46 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
 ```
 ---
 ## 🔍 Vulnerability Advisory Scans (cargo-audit)
 ```text
 [0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
-[0m[0m[1m[32m      Loaded[0m 1349 security advisories (from /home/runner/.cargo/advisory-db)
+[0m[0m[1m[32m      Loaded[0m 1352 security advisories (from /home/runner/.cargo/advisory-db)
 [0m[0m[1m[32m    Updating[0m crates.io index
 [0m[0m[1m[32m    Scanning[0m Cargo.lock for vulnerabilities (829 crate dependencies)
+[0m[0m[1m[31mCrate:    [0m crypto-bigint
+[0m[0m[1m[31mVersion:  [0m 0.5.5
+[0m[0m[1m[31mTitle:    [0m Multiple timing variability issues in operations intended to be constant-time
+[0m[0m[1m[31mDate:     [0m 2026-10-23
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0387
+[0m[0m[1m[31mURL:      [0m https://github.com/RustCrypto/crypto-bigint/pull/1365
+[0m[0m[1m[31mSolution: [0m Upgrade to >=0.7.6
+
 [0m[0m[1m[31mCrate:    [0m h2
 [0m[0m[1m[31mVersion:  [0m 0.3.27
 [0m[0m[1m[31mTitle:    [0m h2 unbounded empty DATA frames
@@ -265,12 +273,20 @@ Generated on: Fri Oct 23 07:20:03 UTC 2026
 [0m[0m[1m[33mID:       [0m RUSTSEC-2026-0002
 [0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0002
 
+[0m[0m[1m[33mCrate:    [0m tokio
+[0m[0m[1m[33mVersion:  [0m 1.52.1
+[0m[0m[1m[33mWarning:  [0m unsound
+[0m[0m[1m[33mTitle:    [0m `AsyncFd::new` and related constructors violate I/O safety
+[0m[0m[1m[33mDate:     [0m 2026-10-13
+[0m[0m[1m[33mID:       [0m RUSTSEC-2026-0386
+[0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0386
+
 [0m[0m[1m[33mCrate:    [0m spin
 [0m[0m[1m[33mVersion:  [0m 0.9.8
 [0m[0m[1m[33mWarning:  [0m yanked
 
-[0m[0m[1m[31merror:[0m 18 vulnerabilities found!
-[0m[0m[1m[33mwarning:[0m 13 allowed warnings found
+[0m[0m[1m[31merror:[0m 19 vulnerabilities found!
+[0m[0m[1m[33mwarning:[0m 14 allowed warnings found
 ```
 ---
 ## 🧬 Mutation Gate: lending
