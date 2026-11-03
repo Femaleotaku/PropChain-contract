@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Mon Nov  2 09:17:21 UTC 2026
+Generated on: Tue Nov  3 09:22:46 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -9,13 +9,13 @@ Generated on: Mon Nov  2 09:17:21 UTC 2026
 [0m[36m20[0m [0m[36m│[0m [0m[31munlicensed[0m = "deny"
    [0m[36m│[0m [0m[31m━━━━━━━━━━[0m
 
-2026-11-02 09:17:21 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
+2026-11-03 09:22:46 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
 ```
 ---
 ## 🔍 Vulnerability Advisory Scans (cargo-audit)
 ```text
 [0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
-[0m[0m[1m[32m      Loaded[0m 1395 security advisories (from /home/runner/.cargo/advisory-db)
+[0m[0m[1m[32m      Loaded[0m 1402 security advisories (from /home/runner/.cargo/advisory-db)
 [0m[0m[1m[32m    Updating[0m crates.io index
 [0m[0m[1m[32m    Scanning[0m Cargo.lock for vulnerabilities (829 crate dependencies)
 [0m[0m[1m[31mCrate:    [0m crypto-bigint
@@ -170,6 +170,15 @@ Generated on: Mon Nov  2 09:17:21 UTC 2026
 
 [0m[0m[1m[31mCrate:    [0m zip
 [0m[0m[1m[31mVersion:  [0m 2.3.0
+[0m[0m[1m[31mTitle:    [0m zip: `ZipArchive::extract` aborts the process on a symlink entry with a large declared size
+[0m[0m[1m[31mDate:     [0m 2026-10-22
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0429
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0429
+[0m[0m[1m[31mSeverity: [0m 7.5 (high)
+[0m[0m[1m[31mSolution: [0m Upgrade to >=9.0.0
+
+[0m[0m[1m[31mCrate:    [0m zip
+[0m[0m[1m[31mVersion:  [0m 2.3.0
 [0m[0m[1m[31mTitle:    [0m  Insecure Preservation of SUID/SGID Bits during ZIP Extraction Leading to Potential Privilege Escalation
 [0m[0m[1m[31mDate:     [0m 2026-10-09
 [0m[0m[1m[31mID:       [0m RUSTSEC-2026-0367
@@ -281,12 +290,16 @@ Generated on: Mon Nov  2 09:17:21 UTC 2026
 [0m[0m[1m[33mID:       [0m RUSTSEC-2026-0386
 [0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0386
 
+[0m[0m[1m[33mCrate:    [0m async-executor
+[0m[0m[1m[33mVersion:  [0m 1.14.0
+[0m[0m[1m[33mWarning:  [0m yanked
+
 [0m[0m[1m[33mCrate:    [0m spin
 [0m[0m[1m[33mVersion:  [0m 0.9.8
 [0m[0m[1m[33mWarning:  [0m yanked
 
-[0m[0m[1m[31merror:[0m 19 vulnerabilities found!
-[0m[0m[1m[33mwarning:[0m 14 allowed warnings found
+[0m[0m[1m[31merror:[0m 20 vulnerabilities found!
+[0m[0m[1m[33mwarning:[0m 15 allowed warnings found
 ```
 ---
 ## 🧬 Mutation Gate: lending
