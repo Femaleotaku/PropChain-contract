@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Wed Nov  4 08:56:09 UTC 2026
+Generated on: Thu Nov  5 09:19:32 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -9,13 +9,13 @@ Generated on: Wed Nov  4 08:56:09 UTC 2026
 [0m[36m20[0m [0m[36m│[0m [0m[31munlicensed[0m = "deny"
    [0m[36m│[0m [0m[31m━━━━━━━━━━[0m
 
-2026-11-04 08:56:09 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
+2026-11-05 09:19:32 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
 ```
 ---
 ## 🔍 Vulnerability Advisory Scans (cargo-audit)
 ```text
 [0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
-[0m[0m[1m[32m      Loaded[0m 1403 security advisories (from /home/runner/.cargo/advisory-db)
+[0m[0m[1m[32m      Loaded[0m 1409 security advisories (from /home/runner/.cargo/advisory-db)
 [0m[0m[1m[32m    Updating[0m crates.io index
 [0m[0m[1m[32m    Scanning[0m Cargo.lock for vulnerabilities (829 crate dependencies)
 [0m[0m[1m[31mCrate:    [0m crypto-bigint
@@ -161,15 +161,6 @@ Generated on: Wed Nov  4 08:56:09 UTC 2026
 
 [0m[0m[1m[31mCrate:    [0m zip
 [0m[0m[1m[31mVersion:  [0m 2.3.0
-[0m[0m[1m[31mTitle:    [0m ZipStreamReader::extract() and ZipArchive::extract() apply Unix permissions through symlinks without confining the target
-[0m[0m[1m[31mDate:     [0m 2026-10-10
-[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0369
-[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0369
-[0m[0m[1m[31mSeverity: [0m 9.1 (critical)
-[0m[0m[1m[31mSolution: [0m Upgrade to >=9.0.0
-
-[0m[0m[1m[31mCrate:    [0m zip
-[0m[0m[1m[31mVersion:  [0m 2.3.0
 [0m[0m[1m[31mTitle:    [0m zip: `ZipArchive::extract` aborts the process on a symlink entry with a large declared size
 [0m[0m[1m[31mDate:     [0m 2026-10-22
 [0m[0m[1m[31mID:       [0m RUSTSEC-2026-0429
@@ -184,6 +175,15 @@ Generated on: Wed Nov  4 08:56:09 UTC 2026
 [0m[0m[1m[31mID:       [0m RUSTSEC-2026-0367
 [0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0367
 [0m[0m[1m[31mSeverity: [0m 7.3 (high)
+[0m[0m[1m[31mSolution: [0m Upgrade to >=9.0.0
+
+[0m[0m[1m[31mCrate:    [0m zip
+[0m[0m[1m[31mVersion:  [0m 2.3.0
+[0m[0m[1m[31mTitle:    [0m ZipStreamReader::extract() and ZipArchive::extract() apply Unix permissions through symlinks without confining the target
+[0m[0m[1m[31mDate:     [0m 2026-10-10
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0369
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0369
+[0m[0m[1m[31mSeverity: [0m 9.1 (critical)
 [0m[0m[1m[31mSolution: [0m Upgrade to >=9.0.0
 
 [0m[0m[1m[33mCrate:    [0m instant
@@ -269,18 +269,18 @@ Generated on: Wed Nov  4 08:56:09 UTC 2026
 [0m[0m[1m[33mCrate:    [0m lru
 [0m[0m[1m[33mVersion:  [0m 0.12.5
 [0m[0m[1m[33mWarning:  [0m unsound
-[0m[0m[1m[33mTitle:    [0m `IterMut` violates Stacked Borrows by invalidating internal pointer
-[0m[0m[1m[33mDate:     [0m 2026-01-07
-[0m[0m[1m[33mID:       [0m RUSTSEC-2026-0002
-[0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0002
-
-[0m[0m[1m[33mCrate:    [0m lru
-[0m[0m[1m[33mVersion:  [0m 0.12.5
-[0m[0m[1m[33mWarning:  [0m unsound
 [0m[0m[1m[33mTitle:    [0m Potential use-after-free due to lack of panic safety in `LruCache::pop()`
 [0m[0m[1m[33mDate:     [0m 2026-05-12
 [0m[0m[1m[33mID:       [0m RUSTSEC-2026-0253
 [0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0253
+
+[0m[0m[1m[33mCrate:    [0m lru
+[0m[0m[1m[33mVersion:  [0m 0.12.5
+[0m[0m[1m[33mWarning:  [0m unsound
+[0m[0m[1m[33mTitle:    [0m `IterMut` violates Stacked Borrows by invalidating internal pointer
+[0m[0m[1m[33mDate:     [0m 2026-01-07
+[0m[0m[1m[33mID:       [0m RUSTSEC-2026-0002
+[0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0002
 
 [0m[0m[1m[33mCrate:    [0m tokio
 [0m[0m[1m[33mVersion:  [0m 1.52.1
