@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Tue Nov 10 09:36:22 UTC 2026
+Generated on: Wed Nov 11 09:12:00 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -9,13 +9,13 @@ Generated on: Tue Nov 10 09:36:22 UTC 2026
 [0m[36m20[0m [0m[36m│[0m [0m[31munlicensed[0m = "deny"
    [0m[36m│[0m [0m[31m━━━━━━━━━━[0m
 
-2026-11-10 09:36:22 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
+2026-11-11 09:12:00 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
 ```
 ---
 ## 🔍 Vulnerability Advisory Scans (cargo-audit)
 ```text
 [0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
-[0m[0m[1m[32m      Loaded[0m 1430 security advisories (from /home/runner/.cargo/advisory-db)
+[0m[0m[1m[32m      Loaded[0m 1453 security advisories (from /home/runner/.cargo/advisory-db)
 [0m[0m[1m[32m    Updating[0m crates.io index
 [0m[0m[1m[32m    Scanning[0m Cargo.lock for vulnerabilities (829 crate dependencies)
 [0m[0m[1m[31mCrate:    [0m crypto-bigint
@@ -282,6 +282,14 @@ Generated on: Tue Nov 10 09:36:22 UTC 2026
 [0m[0m[1m[33mID:       [0m RUSTSEC-2026-0253
 [0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0253
 
+[0m[0m[1m[33mCrate:    [0m rustix
+[0m[0m[1m[33mVersion:  [0m 1.1.4
+[0m[0m[1m[33mWarning:  [0m unsound
+[0m[0m[1m[33mTitle:    [0m xattr functions mark unwritten bytes as initialized when given a zero-length buffer
+[0m[0m[1m[33mDate:     [0m 2026-10-27
+[0m[0m[1m[33mID:       [0m RUSTSEC-2026-0486
+[0m[0m[1m[33mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0486
+
 [0m[0m[1m[33mCrate:    [0m tokio
 [0m[0m[1m[33mVersion:  [0m 1.52.1
 [0m[0m[1m[33mWarning:  [0m unsound
@@ -299,7 +307,7 @@ Generated on: Tue Nov 10 09:36:22 UTC 2026
 [0m[0m[1m[33mWarning:  [0m yanked
 
 [0m[0m[1m[31merror:[0m 20 vulnerabilities found!
-[0m[0m[1m[33mwarning:[0m 15 allowed warnings found
+[0m[0m[1m[33mwarning:[0m 16 allowed warnings found
 ```
 ---
 ## 🧬 Mutation Gate: lending
