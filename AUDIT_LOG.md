@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Sun Nov 22 09:38:14 UTC 2026
+Generated on: Mon Nov 23 10:36:57 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -9,13 +9,13 @@ Generated on: Sun Nov 22 09:38:14 UTC 2026
 [0m[36m20[0m [0m[36m│[0m [0m[31munlicensed[0m = "deny"
    [0m[36m│[0m [0m[31m━━━━━━━━━━[0m
 
-2026-11-22 09:38:14 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
+2026-11-23 10:36:57 [[31mERROR[0m] failed to validate configuration file /home/runner/work/PropChain-contract/PropChain-contract/deny.toml[0m
 ```
 ---
 ## 🔍 Vulnerability Advisory Scans (cargo-audit)
 ```text
 [0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
-[0m[0m[1m[32m      Loaded[0m 1556 security advisories (from /home/runner/.cargo/advisory-db)
+[0m[0m[1m[32m      Loaded[0m 1562 security advisories (from /home/runner/.cargo/advisory-db)
 [0m[0m[1m[32m    Updating[0m crates.io index
 [0m[0m[1m[32m    Scanning[0m Cargo.lock for vulnerabilities (829 crate dependencies)
 [0m[0m[1m[31mCrate:    [0m crypto-bigint
@@ -150,6 +150,14 @@ Generated on: Sun Nov 22 09:38:14 UTC 2026
 [0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0344
 [0m[0m[1m[31mSeverity: [0m 7.5 (high)
 [0m[0m[1m[31mSolution: [0m Upgrade to >=0.9.1
+
+[0m[0m[1m[31mCrate:    [0m url
+[0m[0m[1m[31mVersion:  [0m 2.5.8
+[0m[0m[1m[31mTitle:    [0m Stack overflow in `Url::origin()` on nested `blob:` URLs
+[0m[0m[1m[31mDate:     [0m 2026-11-20
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0592
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0592
+[0m[0m[1m[31mSolution: [0m Upgrade to >=2.5.9
 
 [0m[0m[1m[31mCrate:    [0m zip
 [0m[0m[1m[31mVersion:  [0m 2.3.0
@@ -339,7 +347,7 @@ Generated on: Sun Nov 22 09:38:14 UTC 2026
 [0m[0m[1m[33mVersion:  [0m 0.9.8
 [0m[0m[1m[33mWarning:  [0m yanked
 
-[0m[0m[1m[31merror:[0m 22 vulnerabilities found!
+[0m[0m[1m[31merror:[0m 23 vulnerabilities found!
 [0m[0m[1m[33mwarning:[0m 18 allowed warnings found
 ```
 ---
